@@ -27,5 +27,5 @@ data/*.log
 .DS_Store
 Thumbs.db
 
-log.txt
-*.json
+**/log.txt
+**/board_data.json

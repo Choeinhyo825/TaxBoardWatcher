@@ -510,6 +510,8 @@ if __name__ == "__main__":
     get_config()
     if not os.path.exists(LOG):
         open(LOG, "w", encoding="utf-8").close()
+    if not os.path.exists(BOARD_DATA):
+        open(BOARD_DATA, "w", encoding="utf-8").close()
 
     send_notification("TaxBoardWatcher","start") # 최초 실행 알림창
     manager = ScraperManager()
