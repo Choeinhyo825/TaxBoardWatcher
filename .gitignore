@@ -26,3 +26,6 @@ data/*.log
 # OS-specific
 .DS_Store
 Thumbs.db
+
+log.txt
+*.json

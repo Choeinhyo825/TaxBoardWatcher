@@ -16,8 +16,6 @@ pyinstaller --noconsole --onefile TaxBoardWatcher.py
 
 # 자동시작 생성 경로
 C:\Users\inhyo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
-Dillinger is a cloud-enabled, mobile-ready, offline-storage compatible,
-AngularJS-powered HTML5 Markdown editor.
 ```
 
 ### update 내역
