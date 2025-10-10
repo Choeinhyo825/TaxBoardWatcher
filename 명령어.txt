@@ -1,8 +1,0 @@
-# py 실행
-python TaxBoardWatcher.py
-
-# exe파일 생성
-pyinstaller --noconsole --onefile TaxBoardWatcher.py
-
-# 자동시작 생성 경로
-C:\Users\inhyo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
