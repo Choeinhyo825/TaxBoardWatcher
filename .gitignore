@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+env/
+
+# Build artifacts
+build/
+dist/TaxBoardWatcher.exe
+*.spec
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+data/*.log
+
+# IDE settings
+.vscode/
+.idea/
+*.iml
+
+# OS-specific
+.DS_Store
+Thumbs.db
