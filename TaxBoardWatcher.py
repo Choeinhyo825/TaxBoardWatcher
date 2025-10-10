@@ -39,12 +39,12 @@ def get_config():
             if isinstance(sleep_hour, int) and sleep_hour >= 0:
                 SLEEP_TIME = sleep_hour * 60 * 60
             else:
-                log("w", "", f"설정된 sleep_hour 값이 올바르지 않습니다. 기본값(3)을 사용 합니다.")
+                tax_log("w", "", f"설정된 sleep_hour 값이 올바르지 않습니다. 기본값(3)을 사용 합니다.")
     except Exception as e:
-        log("w","",f"설정 파일을 불러올 수 없습니다: {e}")
+        tax_log("w","",f"설정 파일을 불러올 수 없습니다: {e}")
 
 # --- 공통 함수 ---
-def log(logType, category, message):
+def tax_log(logType, category, message):
     if logType == "e":
         logType = "[ERROR]"
     elif logType == "w":
@@ -139,7 +139,7 @@ def send_notification(title, message, url=None):
 
         root.mainloop()
     except Exception as e:
-        log("e", "", f" 알림 전송 오류: {e}")
+        tax_log("e", "", f" 알림 전송 오류: {e}")
 
 # --- 저장 파일 관리 함수 ---
 def save_data(data):
@@ -152,7 +152,7 @@ def load_data():
                 return json.load(f)
         return {"hometax": {}, "moef": {}}
     except Exception as e:
-        log("e", "", f"파일 로드 오류: {e}")
+        tax_log("e", "", f"파일 로드 오류: {e}")
         return {"hometax": {}, "moef": {}}
 
 # --- 홈택스 크롤러 ---
@@ -178,7 +178,7 @@ class HomeTaxScraper:
     def fetch_latest_posts(self):
         try:
             self.init_driver()
-            log("i", "hometax", f"새 글 찾는 중...")
+            tax_log("i", "hometax", f"새 글 찾는 중...")
             self.driver.get(self.url)
             time.sleep(3)  # 페이지 로딩 대기
             
@@ -205,14 +205,14 @@ class HomeTaxScraper:
                     
                     posts.append({"code": f"{date}_{code}", "title": title})
                 except Exception as e:
-                    log("e", "hometax", f"행 파싱 오류: {e}")
+                    tax_log("e", "hometax", f"행 파싱 오류: {e}")
             
             return posts
         except NoSuchElementException:
-            log("w", "hometax", f"필수 요소를 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.")
+            tax_log("w", "hometax", f"필수 요소를 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.")
             return []
         except Exception as e:
-            log("e", "hometax", f"크롤링 오류: {e}")
+            tax_log("e", "hometax", f"크롤링 오류: {e}")
             return []
         finally:
             if self.driver:
@@ -230,7 +230,7 @@ class HomeTaxScraper:
             latest_posts[post_code] = post_title
             
             if post_code not in self.known_posts:
-                log("i", "hometax", f"새 글 발견: {post_title} (코드: {post_code})")
+                tax_log("i", "hometax", f"새 글 발견: {post_title} (코드: {post_code})")
                 send_notification("HomeTax", post_title, self.url)
                 self.updated = True
 
@@ -246,7 +246,7 @@ class MoefScraper:
 
     def fetch_latest_posts(self):
         try:
-            log("i", "moef", f"새 글 찾는 중...")
+            tax_log("i", "moef", f"새 글 찾는 중...")
             res = requests.get(self.url, timeout=10)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, "html.parser")
@@ -264,7 +264,7 @@ class MoefScraper:
 
             return new_posts
         except Exception as e:
-            log("e", "moef", f"크롤링 오류: {e}")
+            tax_log("e", "moef", f"크롤링 오류: {e}")
             return []
 
     def check_update(self):
@@ -277,7 +277,7 @@ class MoefScraper:
             post_title = post["title"]
             latest_posts[post_code] = post_title
             if post_code not in self.known_posts:
-                log("i", "moef", f"새 글 발견: {post_title} (코드: {post_code})")
+                tax_log("i", "moef", f"새 글 발견: {post_title} (코드: {post_code})")
                 send_notification("기획재정부", post_title, self.url)
                 self.updated = True
 
@@ -293,7 +293,7 @@ class MolegScraper:
 
     def fetch_latest_posts(self):
         try:
-            log("i", "moleg", f"새 글 찾는 중...")
+            tax_log("i", "moleg", f"새 글 찾는 중...")
             res = requests.get(self.url, timeout=10)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, "html.parser")
@@ -312,7 +312,7 @@ class MolegScraper:
 
             return new_posts
         except Exception as e:
-            log("e", "moleg", f"크롤링 오류: {e}")
+            tax_log("e", "moleg", f"크롤링 오류: {e}")
             return []
 
     def check_update(self):
@@ -325,7 +325,7 @@ class MolegScraper:
             post_title = post["title"]
             latest_posts[post_code] = post_title
             if post_code not in self.known_posts:
-                log("i", "moleg", f"새 글 발견: {post_title} (코드: {post_code})")
+                tax_log("i", "moleg", f"새 글 발견: {post_title} (코드: {post_code})")
                 send_notification("법제처", post_title, self.url)
                 self.updated = True
 
@@ -349,7 +349,7 @@ class GwanboScraper:
         self.updated = False
 
     def fetch_latest_posts(self):
-        log("i", "gwanbo", f"새 글 찾는 중...")
+        tax_log("i", "gwanbo", f"새 글 찾는 중...")
         try:
             response = requests.post(self.url, headers=self.headers, data={
                 "mode": "keyword",
@@ -377,7 +377,7 @@ class GwanboScraper:
             return new_posts
         
         except Exception as e:
-            log("e", "gwanbo", f"크롤링 오류: {e}")
+            tax_log("e", "gwanbo", f"크롤링 오류: {e}")
             return []
 
     def check_update(self):
@@ -390,7 +390,7 @@ class GwanboScraper:
             post_title = post["title"]
             latest_posts[post_code] = post_title
             if post_code not in self.known_posts:
-                log("i", "gwanbo", f"새 글 발견: {post_title} (코드: {post_code})")
+                tax_log("i", "gwanbo", f"새 글 발견: {post_title} (코드: {post_code})")
                 send_notification("대한민국 전자관보", post_title, "https://gwanbo.go.kr/user/search/searchKeyword.do")
                 self.updated = True
 
@@ -421,7 +421,7 @@ class ScraperManager:
             self.shared_data["moleg"] = ml_data
             self.shared_data["gwanbo"] = gb_data
             save_data(self.shared_data)
-            log("i", "", f"통합 데이터 파일 업데이트 완료")
+            tax_log("i", "", f"통합 데이터 파일 업데이트 완료")
 
 # --- 트레이 아이콘 세팅 ---
 def create_image():
@@ -430,8 +430,17 @@ def create_image():
     d.ellipse((8, 8, 56, 56), fill=(255, 255, 255))
     return image
 
+# --- LOG 파일 미리보기 함수 ---
+def open_log_file():
+    try:
+        os.startfile(f"{os.getcwd()}/{LOG}")
+        tax_log("i", "System", f"로그 파일을 열었습니다.")
+        
+    except Exception as e:
+        tax_log("e", "System", f"로그 파일 열기 실패: {e}")
+
 def on_exit(icon, item):
-    log("i", "", f"사용자 요청으로 종료")
+    tax_log("i", "", f"사용자 요청으로 종료")
     icon.stop()
     os._exit(0)
 
@@ -439,17 +448,17 @@ def on_exit(icon, item):
 def run_monitor():
     global tray_icon
     # 최초 실행시 즉시 한 번 체크
-    log("i", "", f"프로그램 시작, 최초 크롤링 실행")
+    tax_log("i", "", f"프로그램 시작, 최초 크롤링 실행")
     manager.check_all()
     while True:
         next_check_time = datetime.datetime.now() + datetime.timedelta(seconds=SLEEP_TIME)
-        log("i", "", f"다음 크롤링 예정 시간: {next_check_time.strftime("%Y-%m-%d %H:%M:%S")}")
+        tax_log("i", "", f"다음 크롤링 예정 시간: {next_check_time.strftime("%Y-%m-%d %H:%M:%S")}")
         # tray_icon.title 업데이트
         if tray_icon is not None:
             tray_icon.title = f"다음 크롤링 예정 시간: {next_check_time.strftime('%H시 %M분')}"
         time.sleep(SLEEP_TIME)
         
-        log("i", "", f"시간 경과, 크롤링 시작")
+        tax_log("i", "", f"시간 경과, 크롤링 시작")
         manager.check_all()
 
 # --- 시작프로그램'에 바로가기(.lnk) 파일 생성(최초 1회만 생성) --- 
@@ -471,9 +480,9 @@ def add_to_startup():
         shortcut.WorkingDirectory = os.getcwd()
         shortcut.IconLocation = sys.executable
         shortcut.save()
-        log("i", "", f"시작프로그램 등록 완료: {shortcut_path}")
+        tax_log("i", "", f"시작프로그램 등록 완료: {shortcut_path}")
     # else:
-        # log("i", "", f"시작프로그램에 이미 등록되어 있습니다.")
+        # tax_log("i", "", f"시작프로그램에 이미 등록되어 있습니다.")
 
 def asciiart():
     with open(LOG, "a", encoding="utf-8") as f:
@@ -488,11 +497,11 @@ def asciiart():
 
 # 크롤링 수동 실행
 def manual_crawl(icon, item):
-    log("i", "", f"수동 크롤링 시작")
+    tax_log("i", "", f"수동 크롤링 시작")
     set_tray_icon(SEARCHING_ICON) # 트레이 아이콘 "검색"
     manager.check_all()
     set_tray_icon(ICON) # 트레이 아이콘 기본값
-    log("i", "", f"수동 크롤링 완료")
+    tax_log("i", "", f"수동 크롤링 완료")
 
 # 트레이 아이콘 변경
 def set_tray_icon(image_path):
@@ -500,7 +509,7 @@ def set_tray_icon(image_path):
         icon_image = Image.open(image_path)
         tray_icon.icon = icon_image
     except Exception as e:
-        log("e", "", f"트레이 아이콘 변경 오류: {e}")
+        tax_log("e", "", f"트레이 아이콘 변경 오류: {e}")
 
 
 # --- 메인 실행 ---
@@ -525,6 +534,7 @@ if __name__ == "__main__":
 
     tray_icon.menu = pystray.Menu(
         pystray.MenuItem('크롤링 실행', manual_crawl),
+        pystray.MenuItem('로그 열기', open_log_file),
         pystray.MenuItem('종료', on_exit)
     )
     tray_icon.run()
