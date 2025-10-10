@@ -430,6 +430,15 @@ def create_image():
     d.ellipse((8, 8, 56, 56), fill=(255, 255, 255))
     return image
 
+# --- LOG 파일 미리보기 함수 ---
+def open_log_file():
+    try:
+        os.startfile(f"{os.getcwd()}/{LOG}")
+        tax_log("i", "System", f"로그 파일을 열었습니다.")
+        
+    except Exception as e:
+        tax_log("e", "System", f"로그 파일 열기 실패: {e}")
+
 def on_exit(icon, item):
     tax_log("i", "", f"사용자 요청으로 종료")
     icon.stop()
@@ -525,6 +534,7 @@ if __name__ == "__main__":
 
     tray_icon.menu = pystray.Menu(
         pystray.MenuItem('크롤링 실행', manual_crawl),
+        pystray.MenuItem('로그 열기', open_log_file),
         pystray.MenuItem('종료', on_exit)
     )
     tray_icon.run()
