@@ -6,6 +6,8 @@ from win32com.client import Dispatch
 from PIL import Image, ImageDraw
 from selenium import webdriver
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import tkinter as tk
 import webbrowser
 import threading
@@ -18,7 +20,7 @@ import sys
 import re
 import os
 
-VERSION = "v.3.0.0"
+VERSION = "v.3.0.1"
 
 BOARD_DATA = "data/board_data.json"
 LOG = "data/log.txt"
@@ -26,6 +28,35 @@ ICON = 'data/tax.png'
 SEARCHING_ICON = 'data/searching.png'
 CONFIG = "data/config.json"
 SLEEP_TIME = 3*60*60 # 기본 3시간
+
+# --- HTTP 공통 헤더/세션 ---
+COMMON_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+    "Connection": "keep-alive",
+}
+
+def make_http_session():
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=1.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update(COMMON_HEADERS)
+    return session
 
 tray_icon = None  # 전역 tray_icon 변수
 
@@ -243,11 +274,12 @@ class MoefScraper:
     def __init__(self, shared_data):
         self.url = "https://www.moef.go.kr/lw/lap/TbPrvntcList.do?bbsId=MOSFBBS_000000000055&menuNo=7050300&searchCondition3=1&searchKeyword3=%EC%86%8C%EB%93%9D%EC%84%B8"
         self.known_posts = shared_data.get("moef", {})
+        self.session = make_http_session()
 
     def fetch_latest_posts(self):
         try:
             tax_log("i", "moef", f"새 글 찾는 중...")
-            res = requests.get(self.url, timeout=10)
+            res = self.session.get(self.url, timeout=15)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, "html.parser")
 
@@ -290,11 +322,12 @@ class MolegScraper:
     def __init__(self, shared_data):
         self.url = "https://www.moleg.go.kr/lawinfo/makingList.mo?mid=a10104010000&pageCnt=10&lsClsCd=&cptOfiOrgCd=&keyField=lmNm&keyWord=%EC%86%8C%EB%93%9D%EC%84%B8%EB%B2%95&stYdFmt=&edYdFmt="
         self.known_posts = shared_data.get("moleg", {})
+        self.session = make_http_session()
 
     def fetch_latest_posts(self):
         try:
             tax_log("i", "moleg", f"새 글 찾는 중...")
-            res = requests.get(self.url, timeout=10)
+            res = self.session.get(self.url, timeout=15)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, "html.parser")
 
@@ -343,15 +376,15 @@ class GwanboScraper:
         self.url = "https://gwanbo.go.kr/SearchRestApi.jsp"
         self.headers = {
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "User-Agent": "Mozilla/5.0"
         }
         self.known_posts = shared_data.get("gwanbo", {})
         self.updated = False
+        self.session = make_http_session()
 
     def fetch_latest_posts(self):
         tax_log("i", "gwanbo", f"새 글 찾는 중...")
         try:
-            response = requests.post(self.url, headers=self.headers, data={
+            response = self.session.post(self.url, headers=self.headers, data={
                 "mode": "keyword",
                 "index": "gwanbo",
                 "query": "(unstored_field_subject:(소득세법)) AND keyword_category_order:(@@ORDER_NUM)",
@@ -359,7 +392,7 @@ class GwanboScraper:
                 "pageNo": "1",
                 "listSize": "5",
                 "sort": ""
-            })
+            }, timeout=15)
             response.raise_for_status()
             json_data = response.json()
             new_posts = []
@@ -486,14 +519,14 @@ def add_to_startup():
 
 def asciiart():
     with open(LOG, "a", encoding="utf-8") as f:
-        f.write(f"=================================================================================================== {VERSION}\n")
-        f.write(f" _____                 ______                          _     _    _         _          _                  \n")
-        f.write(f"|_   _|                | ___ \                        | |   | |  | |       | |        | |                 \n")
-        f.write(f"  | |    __ _ __  __   | |_/ /  ___    __ _  _ __   __| |   | |  | |  __ _ | |_   ___ | |__    ___  _ __  \n")
-        f.write(f"  | |   / _` |\ \/ /   | ___ \ / _ \  / _` || '__| / _` |   | |/\| | / _` || __| / __|| '_ \  / _ \| '__| \n")
-        f.write(f"  | |  | (_| | >  <    | |_/ /| (_) || (_| || |   | (_| |   \  /\  /| (_| || |_ | (__ | | | ||  __/| |    \n")
-        f.write(f"  \_/   \__,_|/_/\_\   \____/  \___/  \__,_||_|    \__,_|    \/  \/  \__,_| \__| \___||_| |_| \___||_|    \n")
-        f.write(f"==========================================================================================================\n")
+        f.write(rf"=================================================================================================== {VERSION}""\n")
+        f.write(r" _____                 ______                          _     _    _         _          _                  ""\n")
+        f.write(r"|_   _|                | ___ \                        | |   | |  | |       | |        | |                 ""\n")
+        f.write(r"  | |    __ _ __  __   | |_/ /  ___    __ _  _ __   __| |   | |  | |  __ _ | |_   ___ | |__    ___  _ __  ""\n")
+        f.write(r"  | |   / _` |\ \/ /   | ___ \ / _ \  / _` || '__| / _` |   | |/\| | / _` || __| / __|| '_ \  / _ \| '__| ""\n")
+        f.write(r"  | |  | (_| | >  <    | |_/ /| (_) || (_| || |   | (_| |   \  /\  /| (_| || |_ | (__ | | | ||  __/| |    ""\n")
+        f.write(r"  \_/   \__,_|/_/\_\   \____/  \___/  \__,_||_|    \__,_|    \/  \/  \__,_| \__| \___||_| |_| \___||_|    ""\n")
+        f.write(r"==========================================================================================================""\n")
 
 # 크롤링 수동 실행
 def manual_crawl(icon, item):
