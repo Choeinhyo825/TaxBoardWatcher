@@ -5,6 +5,7 @@
 - [기획재정부 입법 행정예고(검색어 "소득세")][moef]
 - [법제처(검색어 "소득세법")][moleg]
 - [전자관보(검색어 "소득세법")][gwanbo]
+- [행정안전부][mois]
 
 ### 기본 명령어
 ```sh
@@ -15,7 +16,7 @@ python TaxBoardWatcher.py
 pyinstaller --noconsole --onefile TaxBoardWatcher.py
 
 # 자동시작 생성 경로
-C:\Users\inhyo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
+C:\Users\사용자명\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
 ```
 
 ### update 내역
@@ -25,3 +26,4 @@ dist/readme.txt 를 참고 하세요.
    [moef]: <https://www.moef.go.kr/lw/lap/TbPrvntcList.do?bbsId=MOSFBBS_000000000055&menuNo=7050300&searchCondition3=1&searchKeyword3=%EC%86%8C%EB%93%9D%EC%84%B8>
    [moleg]: <https://www.moleg.go.kr/lawinfo/makingList.mo?mid=a10104010000&pageCnt=10&lsClsCd=&cptOfiOrgCd=&keyField=lmNm&keyWord=%EC%86%8C%EB%93%9D%EC%84%B8%EB%B2%95&stYdFmt=&edYdFmt=>
    [gwanbo]: <https://gwanbo.go.kr/user/search/searchKeyword.do?pKeyword=%EC%86%8C%EB%93%9D%EC%84%B8%EB%B2%95>
+   [mois]: <https://www.mois.go.kr/frt/bbs/type001/commonSelectBoardList.do?bbsId=BBSMSTR_000000000052>
