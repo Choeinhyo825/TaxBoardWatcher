@@ -6,7 +6,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from win32com.client import Dispatch
 from urllib.parse import urlencode
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
+from io import BytesIO
 from selenium import webdriver
 from bs4 import BeautifulSoup
 from html import escape
@@ -16,6 +17,7 @@ import threading
 import datetime
 import requests
 import pystray
+import ctypes
 import json
 import time
 import sys
@@ -27,7 +29,7 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.4.0.0"
+VERSION = "v.5.0.0"
 
 BOARD_DATA = "data/board_data.json"
 LOG = "data/log.txt"
@@ -42,6 +44,7 @@ BOARD_OVERVIEW_CARD_LOGOS = {
     "moef": "https://mofe.go.kr/images/2026/logo.svg",
     "moleg": "https://www.moleg.go.kr/_kor/img/layout/logo.png",
     "gwanbo": "https://gwanbo.go.kr/image/common/logo.jpg",
+    "mois": "https://www.mois.go.kr/frt2022/main/img/common/logo4.png",
 }
 
 # --- HTTP 공통 헤더/세션 ---
@@ -75,7 +78,41 @@ def make_http_session():
 
 tray_icon = None  # 전역 tray_icon 변수
 
-# --- config.json 로드 ---
+_logo_pil_cache: dict = {}  # site_key -> PIL.Image | None
+_interval_changed = threading.Event()  # 모니터링 주기 변경 시 sleep 중단용
+
+def get_base_dir() -> str:
+    """실행 환경(스크립트/PyInstaller exe)에 관계없이 프로그램 루트 디렉토리를 반환."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller --onefile: sys.executable = 실제 .exe 경로
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _load_logo_photo(site_key: str, max_h: int = 38):
+    if site_key not in _logo_pil_cache:
+        base_dir = get_base_dir()
+        logo_path_candidate = os.path.join(base_dir, "data", f"{site_key}_logo.png")
+        logo_path = logo_path_candidate if os.path.exists(logo_path_candidate) else None
+        if not logo_path:
+            _logo_pil_cache[site_key] = None
+        else:
+            try:
+                img = Image.open(logo_path).convert("RGBA")
+                w, h = img.size
+                if h > max_h:
+                    img = img.resize((int(w * max_h / h), max_h), Image.LANCZOS)
+                _logo_pil_cache[site_key] = img
+            except Exception as e:
+                _logo_pil_cache[site_key] = None
+    pil_img = _logo_pil_cache.get(site_key)
+    if pil_img is None:
+        return None
+    try:
+        return ImageTk.PhotoImage(pil_img)
+    except Exception:
+        return None
+
+# --- config.json 로드/저장 ---
 def get_config():
     global SLEEP_TIME
     try:
@@ -89,6 +126,20 @@ def get_config():
     except Exception as e:
         tax_log("w","",f"설정 파일을 불러올 수 없습니다: {e}")
 
+def save_config():
+    try:
+        with open(CONFIG, "w", encoding="utf-8") as f:
+            json.dump({"sleep_hour": int(SLEEP_TIME / 3600)}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        tax_log("w", "", f"설정 저장 실패: {e}")
+
+def set_sleep_hour(hours):
+    global SLEEP_TIME
+    SLEEP_TIME = hours * 3600
+    save_config()
+    tax_log("i", "", f"모니터링 주기 변경: {hours}시간")
+    _interval_changed.set()
+
 # --- 공통 함수 ---
 def tax_log(logType, category, message):
     if logType == "e":
@@ -101,13 +152,15 @@ def tax_log(logType, category, message):
         logType = ""
     
     if category == "hometax":
-        category = "[ 홈텍스 ]"
+        category = "[ 홈택스 ]"
     elif category == "moef":
         category = "[ 기재부 ]"
     elif category == "moleg":
         category = "[ 법제처 ]"
     elif category == "gwanbo":
         category = "[ 관　보 ]"
+    elif category == "mois":
+        category = "[ 행안부 ]"
     else:
         category = "[ SYSTEM ]"
 
@@ -141,20 +194,26 @@ def notify_manual_monitor_toast(title: str, msg: str, *, error: bool = False):
         tax_log("e", "", f"Windows 토스트 표시 실패: {e}")
 
 
-def send_notification(title, message, url=None):
-    try:
-        # 알림창 생성
-        root = tk.Tk()
-        root.withdraw() # 창을 처음엔 숨김 상태로 시작
-        root.title(title)
-        root.resizable(False, False)
-        root.configure(bg="#f0f4f7") # 배경색 설정
-        root.attributes("-topmost", True) # 창을 항상 위로
-        root.attributes("-alpha", 0.0)  # 처음엔 완전 투명
+def send_notification(title, message, url=None, site_key=None):
+    BG     = "#ffffff"
+    BG_MSG = "#f4f7fb"
+    ACCENT = "#0078D7"
+    FONT   = "Malgun Gothic"
+    PRIMARY  = "#2563EB"
+    TEXT_S   = "#333333"
 
-        # 알림창 아이콘
-        icon_img = tk.PhotoImage(file=ICON)
-        root.iconphoto(False, icon_img)
+    try:
+        root = tk.Tk()
+        try:
+            dpi = ctypes.windll.user32.GetDpiForSystem()
+            root.tk.call('tk', 'scaling', dpi / 72.0)
+        except Exception:
+            pass
+        root.withdraw()
+        root.overrideredirect(True)
+        root.configure(bg="#c8cdd2")
+        root.attributes("-topmost", True)
+        root.attributes("-alpha", 0.0)
 
         def open_url():
             webbrowser.open(url)
@@ -162,64 +221,112 @@ def send_notification(title, message, url=None):
         def on_close():
             root.destroy()
 
-        # 새 글 발견시 url이 존재함.
-        if url:
-            # 느낌표 아이콘 
-            canvas = tk.Canvas(root, width=50, height=50, bg="#f0f4f7", highlightthickness=0)
-            canvas.create_oval(5, 5, 45, 45, fill="#0078D7", outline="#0078D7")
-            canvas.create_text(25, 25, text="!", font=("Arial", 16, "bold"), fill="white")
-            canvas.pack(pady=(15, 5))
-            # 텍스트 라벨
-            label1 = tk.Label(root, text="새로운 글이 등록되었습니다.", bg="#f0f4f7", font=("Arial", 12, "bold"))
-            label1.pack()
-            label2 = tk.Label(root, text=message, bg="#f0f4f7", font=("Arial", 10), wraplength=300)
-            label2.pack(pady=(5, 15))
-            # 버튼 영역
-            button_frame = tk.Frame(root, bg="#f0f4f7")
-            button_frame.pack(pady=(0, 10))
-            open_button = tk.Button(button_frame, text="페이지 열기", command=open_url, width=12, bg="#0078D7", fg="white", font=("Arial", 10, "bold"))
-            open_button.pack(side="left", padx=10)
-            close_button = tk.Button(button_frame, text="닫기", command=on_close, width=12, bg="#cccccc", font=("Arial", 10, "bold"))
-            close_button.pack(side="left", padx=10)
-        elif message == 'start': # 최초 실행
-            global SLEEP_TIME
-            # 돋보기 아이콘
-            canvas = tk.Canvas(root, width=50, height=50, bg="#f0f4f7", highlightthickness=0)
-            canvas.create_oval(10, 10, 30, 30, outline="#0078D7", width=4)
-            canvas.create_line(28, 28, 40, 40, fill="#0078D7", width=4)
-            canvas.pack(pady=(15, 5))
-            # 텍스트 라벨
-            label1 = tk.Label(root, text="TaxBoardWatcher를 시작합니다.", bg="#f0f4f7", font=("Arial", 12, "bold"))
-            label1.pack()
-            label2 = tk.Label(root, text=f"현재 설정된 모니터링 간격은 {int(SLEEP_TIME/60/60)}시간입니다.", bg="#f0f4f7", font=("Arial", 10), wraplength=300)
-            label2.pack(pady=(5, 15))
-            # 버튼 영역
-            button_frame = tk.Frame(root, bg="#f0f4f7")
-            button_frame.pack()
-            close_button = tk.Button(button_frame, text="시작", command=on_close, width=12, bg="#0078D7", fg="white", font=("Arial", 10, "bold"))
-            close_button.pack(side="left", padx=10)
+        # 1px 외곽 테두리
+        outer = tk.Frame(root, bg="#c8cdd2", padx=1, pady=1)
+        outer.pack(fill="both", expand=True)
 
-        root.update_idletasks()  # 내부 위젯 크기에 맞게 자동 조정
-        root.minsize(350, 200)  # 최소 크기만 지정
-        w = max(root.winfo_reqwidth(), 350)
-        h = max(root.winfo_reqheight(), 200)
+        wrap = tk.Frame(outer, bg=BG)
+        wrap.pack(fill="both", expand=True)
+
+        # 드래그 가능한 상단 액센트 바
+        drag_bar = tk.Frame(wrap, bg=ACCENT, height=36)
+        drag_bar.pack(fill="x", side="top")
+        drag_bar.pack_propagate(False)
+
+        bar_lbl = tk.Label(drag_bar, text="TaxBoardWatcher - 새로운 게시물" if url else "TaxBoardWatcher", bg=ACCENT,
+                           fg="white", font=(FONT, 9), padx=12)
+        bar_lbl.pack(side="left", fill="y")
+
+        def _drag_start(e):
+            root._dx = e.x_root - root.winfo_x()
+            root._dy = e.y_root - root.winfo_y()
+        def _drag_move(e):
+            root.geometry(f"+{e.x_root - root._dx}+{e.y_root - root._dy}")
+
+        for w in (drag_bar, bar_lbl):
+            w.bind("<ButtonPress-1>", _drag_start)
+            w.bind("<B1-Motion>",     _drag_move)
+
+        # 본문
+        body = tk.Frame(wrap, bg=BG, padx=24, pady=20)
+        body.pack(fill="both", expand=True)
+
+        if url:
+            # 로고 or 사이트명 텍스트
+            logo_photo = _load_logo_photo(site_key, max_h=52) if site_key else None
+            if logo_photo:
+                logo_lbl = tk.Label(body, image=logo_photo, bg=BG)
+                logo_lbl.image = logo_photo  # GC 방지
+                logo_lbl.pack(anchor="w", pady=(0, 10))
+            else:
+                tk.Label(body, text=title, bg=BG,
+                         font=(FONT, 13, "bold"), fg="#1a1a1a").pack(anchor="w", pady=(0, 10))
+
+            # 구분선
+            tk.Frame(body, bg="#e4e8ed", height=1).pack(fill="x", pady=(0, 12))
+
+            # 메시지 박스
+            msg_box = tk.Frame(body, bg=BG_MSG, padx=14, pady=12)
+            msg_box.pack(fill="x", pady=(0, 20))
+            tk.Label(msg_box, text=message, bg=BG_MSG,
+                     font=(FONT, 10), fg=TEXT_S,
+                     wraplength=550, justify="left").pack(anchor="w")
+
+            # 버튼 (중앙)
+            btn_row = tk.Frame(body, bg=BG)
+            btn_row.pack()
+            tk.Button(btn_row, text="열기", command=open_url,
+                      bg=ACCENT, fg="white", font=(FONT, 9),
+                      relief="flat", padx=10, pady=1, cursor="hand2",
+                      activebackground="#106EBE", activeforeground="white").pack(side="left", padx=4)
+            tk.Button(btn_row, text="닫기", command=on_close,
+                      bg="#e8e8e8", fg="#444444", font=(FONT, 9),
+                      relief="flat", padx=10, pady=1, cursor="hand2",
+                      activebackground="#d4d4d4").pack(side="left", padx=4)
+
+        elif message == 'start':
+            global SLEEP_TIME
+            tk.Label(body, text="TaxBoardWatcher", bg=BG,
+                     font=(FONT, 14, "bold"), fg="#1a1a1a").pack(anchor="w")
+            tk.Label(body, text="모니터링을 시작합니다.", bg=BG,
+                     font=(FONT, 9), fg="#999999").pack(anchor="w", pady=(3, 12))
+
+            tk.Frame(body, bg="#e4e8ed", height=1).pack(fill="x", pady=(0, 12))
+
+            info_box = tk.Frame(body, bg=BG_MSG, padx=14, pady=12)
+            info_box.pack(fill="x", pady=(0, 20))
+            tk.Label(info_box, text="🕓 모니터링 간격", bg=BG_MSG,
+                     font=(FONT, 9), fg=TEXT_S).pack(side="left")
+            tk.Label(info_box, text=f"{int(SLEEP_TIME / 3600)}시간", bg=BG_MSG,
+                     font=(FONT, 9, "bold"), fg=PRIMARY).pack(side="right")
+
+            btn_row = tk.Frame(body, bg=BG)
+            btn_row.pack()
+            tk.Button(btn_row, text="시작", command=on_close,
+                      bg=ACCENT, fg="white", font=(FONT, 9),
+                      relief="flat", padx=10, pady=1, cursor="hand2",
+                      activebackground="#106EBE", activeforeground="white").pack()
+
+        root.update_idletasks()
+        min_w = 350 if message == "start" else 600
+        w = max(root.winfo_reqwidth(), min_w)
+        h = root.winfo_reqheight()
         x = (root.winfo_screenwidth() - w) // 2
         y = (root.winfo_screenheight() - h) // 2
         root.geometry(f"{w}x{h}+{x}+{y}")
-        root.deiconify()  # withdraw() 이후 알림창 표시하기 위함
+        root.deiconify()
 
-        # Fade-in 애니메이션
-        for i in range(0, 11):  # 0.0 ~ 1.0
+        for i in range(0, 11):
             root.attributes("-alpha", i / 10)
             root.update()
-            time.sleep(0.03)  # 속도 조정 가능 (0.02~0.05 정도가 자연스러움)
+            time.sleep(0.03)
 
         root.mainloop()
     except Exception as e:
         tax_log("e", "", f" 알림 전송 오류: {e}")
 
 # 모니터링 섹션 키 (board_data.json 값은 항상 dict[str, dict] 형태로 통일)
-BOARD_DATA_SECTIONS = ("hometax", "moef", "moleg", "gwanbo")
+BOARD_DATA_SECTIONS = ("hometax", "moef", "moleg", "gwanbo", "mois")
 
 
 def _normalize_board_data(data):
@@ -249,6 +356,8 @@ def _normalize_board_data(data):
             out[section] = {k: _moleg_entry_from_value(v) for k, v in raw.items()}
         elif section == "gwanbo":
             out[section] = {k: _gwanbo_entry_from_value(v) for k, v in raw.items()}
+        elif section == "mois":
+            out[section] = {k: _mois_entry_from_value(v) for k, v in raw.items()}
     return out
 
 
@@ -337,6 +446,16 @@ def _gwanbo_entry_from_value(v):
     return {"title": str(v).strip(), "published_date": ""}
 
 
+def _mois_entry_from_value(v):
+    """mois 항목: dict(신규) 또는 str(구버전)을 {title, date}로 통일."""
+    if isinstance(v, dict):
+        return {
+            "title": (v.get("title") or "").strip(),
+            "date": (v.get("date") or "").strip(),
+        }
+    return {"title": str(v).strip(), "date": ""}
+
+
 def load_data():
     try:
         if os.path.exists(BOARD_DATA):
@@ -356,6 +475,9 @@ def load_data():
             gwanbo = data.get("gwanbo")
             if isinstance(gwanbo, dict):
                 data["gwanbo"] = {k: _gwanbo_entry_from_value(v) for k, v in gwanbo.items()}
+            mois = data.get("mois")
+            if isinstance(mois, dict):
+                data["mois"] = {k: _mois_entry_from_value(v) for k, v in mois.items()}
             return data
         return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}}
     except Exception as e:
@@ -383,9 +505,9 @@ class HomeTaxScraper:
         self.driver = None
 
     def fetch_latest_posts(self):
+        self._fetch_ok = False
         try:
             self.init_driver()
-            tax_log("i", "hometax", f"새 글 찾는 중...")
             self.driver.get(self.url)
             time.sleep(3)  # 페이지 로딩 대기
             
@@ -426,6 +548,7 @@ class HomeTaxScraper:
                 except Exception as e:
                     tax_log("e", "hometax", f"행 파싱 오류: {e}")
             
+            self._fetch_ok = True
             return posts
         except NoSuchElementException:
             tax_log("w", "hometax", f"필수 요소를 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.")
@@ -454,11 +577,13 @@ class HomeTaxScraper:
 
             if post_code not in self.known_posts:
                 tax_log("i", "hometax", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("HomeTax", post_title, self.url)
+                send_notification("HomeTax", post_title, self.url, site_key="hometax")
                 self.updated = True
 
         if latest_posts:
             self.known_posts = latest_posts
+        if self._fetch_ok and not self.updated:
+            tax_log("i", "hometax", "새로운 글이 없습니다.")
         return self.updated, self.known_posts
 
 # --- 기획재정부 스크래핑 ---
@@ -469,8 +594,8 @@ class MoefScraper:
         self.session = make_http_session()
 
     def fetch_latest_posts(self):
+        self._fetch_ok = False
         try:
-            tax_log("i", "moef", f"새 글 찾는 중...")
             res = self.session.get(self.url, timeout=15)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, "html.parser")
@@ -503,6 +628,7 @@ class MoefScraper:
                     {"code": post_id, "title": title, "date": date_str, "depart": depart_str}
                 )
 
+            self._fetch_ok = True
             return new_posts
         except Exception as e:
             tax_log("e", "moef", f"모니터링 오류: {e}")
@@ -523,11 +649,13 @@ class MoefScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "moef", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("기획재정부", post_title, self.url)
+                send_notification("기획재정부", post_title, self.url, site_key="moef")
                 self.updated = True
 
         if latest_posts:
             self.known_posts = latest_posts
+        if self._fetch_ok and not self.updated:
+            tax_log("i", "moef", "새로운 글이 없습니다.")
         return self.updated, self.known_posts
 
 # --- 법제처 스크래핑 ---
@@ -538,8 +666,8 @@ class MolegScraper:
         self.session = make_http_session()
 
     def fetch_latest_posts(self):
+        self._fetch_ok = False
         try:
-            tax_log("i", "moleg", f"새 글 찾는 중...")
             res = self.session.get(self.url, timeout=15)
             res.raise_for_status()
             soup = BeautifulSoup(res.text, "html.parser")
@@ -576,6 +704,7 @@ class MolegScraper:
                     }
                 )
 
+            self._fetch_ok = True
             return new_posts
         except Exception as e:
             tax_log("e", "moleg", f"모니터링 오류: {e}")
@@ -598,11 +727,13 @@ class MolegScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "moleg", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("법제처", post_title, self.url)
+                send_notification("법제처", post_title, self.url, site_key="moleg")
                 self.updated = True
 
         if latest_posts:
             self.known_posts = latest_posts
+        if self._fetch_ok and not self.updated:
+            tax_log("i", "moleg", "새로운 글이 없습니다.")
         return self.updated, self.known_posts
 
     def _extract_law_seq(self, href: str) -> str:
@@ -627,7 +758,7 @@ class GwanboScraper:
         return f"{base}?{urlencode({'pKeyword': self.search_keyword})}"
 
     def fetch_latest_posts(self):
-        tax_log("i", "gwanbo", f"새 글 찾는 중...")
+        self._fetch_ok = False
         kw = self.search_keyword
         try:
             response = self.session.post(self.url, headers=self.headers, data={
@@ -665,8 +796,9 @@ class GwanboScraper:
                         }
                     )
 
+            self._fetch_ok = True
             return new_posts
-        
+
         except Exception as e:
             tax_log("e", "gwanbo", f"모니터링 오류: {e}")
             return []
@@ -685,12 +817,92 @@ class GwanboScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "gwanbo", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("대한민국 전자관보", post_title, self.keyword_search_page_url())
+                send_notification("대한민국 전자관보", post_title, self.keyword_search_page_url(), site_key="gwanbo")
                 self.updated = True
 
         if latest_posts:
             self.known_posts = latest_posts
+        if self._fetch_ok and not self.updated:
+            tax_log("i", "gwanbo", "새로운 글이 없습니다.")
         return self.updated, self.known_posts
+
+# --- 행정안전부 스크래핑 ---
+class MoisScraper:
+    def __init__(self, shared_data):
+        self.url = "https://www.mois.go.kr/frt/bbs/type001/commonSelectBoardList.do?bbsId=BBSMSTR_000000000052"
+        self.search_keyword = "행정기관(행정동) 및 관할구역(법정동)"
+        self.known_posts = shared_data.get("mois", {})
+        self.session = make_http_session()
+
+    def keyword_search_page_url(self):
+        return self.url
+
+    def fetch_latest_posts(self):
+        self._fetch_ok = False
+        try:
+            res = self.session.get(self.url, timeout=15)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, "html.parser")
+
+            rows = soup.select("table.table_style1.mobile tbody tr")
+            new_posts = []
+
+            for tr in rows:
+                tds = tr.find_all("td")
+                if len(tds) < 5:
+                    continue
+                a = tds[1].find("a")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                title = a.get_text(strip=True)
+                if not href or not title:
+                    continue
+                if self.search_keyword and self.search_keyword not in title:
+                    continue
+                ntt_id = self._extract_ntt_id(href)
+                if not ntt_id:
+                    continue
+                date = tds[4].get_text(strip=True).rstrip(".") if len(tds) > 4 else ""
+                new_posts.append({
+                    "code": ntt_id,
+                    "title": title,
+                    "date": date,
+                })
+
+            self._fetch_ok = True
+            return new_posts
+        except Exception as e:
+            tax_log("e", "mois", f"모니터링 오류: {e}")
+            return []
+
+    def check_update(self):
+        self.updated = False
+        posts = self.fetch_latest_posts()
+
+        latest_posts = {}
+        for post in posts:
+            post_code = post["code"]
+            post_title = post["title"]
+            latest_posts[post_code] = {
+                "title": post_title,
+                "date": post.get("date", ""),
+            }
+            if post_code not in self.known_posts:
+                tax_log("i", "mois", f"새 글 발견: {post_title} (코드: {post_code})")
+                send_notification("행정안전부", post_title, self.keyword_search_page_url(), site_key="mois")
+                self.updated = True
+
+        if latest_posts:
+            self.known_posts = latest_posts
+        if self._fetch_ok and not self.updated:
+            tax_log("i", "mois", "새로운 글이 없습니다.")
+        return self.updated, self.known_posts
+
+    def _extract_ntt_id(self, href: str) -> str:
+        match = re.search(r"nttId=(\d+)", href)
+        return match.group(1) if match else None
+
 
 # --- 매니저 클래스 ---
 class ScraperManager:
@@ -700,22 +912,31 @@ class ScraperManager:
         self.moef_scraper = MoefScraper(self.shared_data)
         self.moleg_scraper = MolegScraper(self.shared_data)
         self.gwanbo_scraper = GwanboScraper(self.shared_data)
+        self.mois_scraper = MoisScraper(self.shared_data)
 
     def check_all(self):
-        updated = False
+        def _run(scraper, key):
+            s_updated, s_data = scraper.check_update()
+            if not getattr(scraper, "_fetch_ok", True):
+                tax_log("i", key, "조회 실패, 3초 후 재시도...")
+                time.sleep(3)
+                s_updated, s_data = scraper.check_update()
+            return s_updated, s_data
 
-        ht_updated, ht_data = self.hometax_scraper.check_update()
-        mf_updated, mf_data = self.moef_scraper.check_update()
-        ml_updated, ml_data = self.moleg_scraper.check_update()
-        gb_updated, gb_data = self.gwanbo_scraper.check_update()
+        ht_updated, ht_data = _run(self.hometax_scraper, "hometax")
+        mf_updated, mf_data = _run(self.moef_scraper,    "moef")
+        ml_updated, ml_data = _run(self.moleg_scraper,   "moleg")
+        gb_updated, gb_data = _run(self.gwanbo_scraper,  "gwanbo")
+        mo_updated, mo_data = _run(self.mois_scraper,    "mois")
 
-        if ht_updated or mf_updated or ml_updated or gb_updated:
+        if ht_updated or mf_updated or ml_updated or gb_updated or mo_updated:
             self.shared_data["hometax"] = ht_data
             self.shared_data["moef"] = mf_data
             self.shared_data["moleg"] = ml_data
             self.shared_data["gwanbo"] = gb_data
+            self.shared_data["mois"] = mo_data
             save_data(self.shared_data)
-            tax_log("i", "", f"통합 데이터 파일 업데이트 완료")
+            tax_log("i", "", "통합 데이터 파일 업데이트 완료")
 
 # --- 트레이 아이콘 세팅 ---
 def create_image():
@@ -909,15 +1130,46 @@ def _format_moleg_overview_html(posts):
     )
 
 
+def _format_mois_overview_html(posts):
+    if not posts:
+        return (
+            '<div class="table-wrap mois-table-wrap">'
+            '<table class="board-table mois-table">'
+            "<thead><tr><th>제목</th><th>등록일</th></tr></thead>"
+            "<tbody><tr><td colspan=\"2\" class=\"empty-cell\">저장된 목록이 없습니다.</td></tr></tbody>"
+            "</table></div>"
+        )
+    body_rows = []
+    for code, raw in posts.items():
+        ent = _mois_entry_from_value(raw)
+        title = escape(ent["title"]) if ent["title"] else "—"
+        date_v = escape(ent["date"]) if ent["date"] else "—"
+        body_rows.append(
+            f'<tr data-code="{escape(code)}">'
+            f'<td class="col-title">{title}</td>'
+            f'<td class="col-date">{date_v}</td>'
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap mois-table-wrap">'
+        '<table class="board-table mois-table">'
+        "<thead><tr><th>제목</th><th>등록일</th></tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+    )
+
+
 def show_board_overview(icon, item):
     """HTML 파일을 생성해 4개 모니터링 목록을 브라우저로 연다."""
     try:
+        base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
         data = load_data()
         sections = [
             ("홈택스", "hometax", manager.hometax_scraper.url),
             ("기획재정부", "moef", manager.moef_scraper.url),
             ("법제처", "moleg", manager.moleg_scraper.url),
             ("전자관보", "gwanbo", manager.gwanbo_scraper.keyword_search_page_url()),
+            ("행정안전부", "mois", manager.mois_scraper.keyword_search_page_url()),
         ]
 
         cards = []
@@ -931,6 +1183,8 @@ def show_board_overview(icon, item):
                 list_block = _format_moef_overview_html(posts)
             elif key == "moleg":
                 list_block = _format_moleg_overview_html(posts)
+            elif key == "mois":
+                list_block = _format_mois_overview_html(posts)
             else:
                 list_items = []
                 if posts:
@@ -940,11 +1194,15 @@ def show_board_overview(icon, item):
                     list_items.append("<li class='empty'>저장된 목록이 없습니다.</li>")
                 list_block = f"<ul>{''.join(list_items)}</ul>"
 
-            logo_url = BOARD_OVERVIEW_CARD_LOGOS.get(key)
-            if logo_url:
+            local_logo = os.path.join(base_dir, "data", f"{key}_logo.png")
+            if os.path.exists(local_logo):
+                logo_src = f"{key}_logo.png"
+            else:
+                logo_src = BOARD_OVERVIEW_CARD_LOGOS.get(key, "")
+            if logo_src:
                 heading_html = (
                     f'<h2 class="card-site-heading">'
-                    f'<img class="card-site-logo" src="{escape(logo_url)}" alt="{escape(title)}" '
+                    f'<img class="card-site-logo" src="{escape(logo_src)}" alt="{escape(title)}" '
                     'loading="lazy" decoding="async" />'
                     f"</h2>"
                 )
@@ -1202,7 +1460,6 @@ def show_board_overview(icon, item):
 </html>
 """
 
-        base_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(base_dir, "data")
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, "board_overview.html")
@@ -1228,12 +1485,14 @@ def run_monitor():
     manager.check_all()
     while True:
         next_check_time = datetime.datetime.now() + datetime.timedelta(seconds=SLEEP_TIME)
-        tax_log("i", "", f"다음 모니터링 예정 시간: {next_check_time.strftime("%Y-%m-%d %H:%M:%S")}")
-        # tray_icon.title 업데이트
+        tax_log("i", "", f"다음 모니터링 예정 시간: {next_check_time.strftime('%Y-%m-%d %H:%M:%S')}")
         if tray_icon is not None:
             tray_icon.title = f"다음 모니터링 예정 시간: {next_check_time.strftime('%H시 %M분')}"
-        time.sleep(SLEEP_TIME)
-        
+        interrupted = _interval_changed.wait(SLEEP_TIME)
+        _interval_changed.clear()
+        if interrupted:
+            tax_log("i", "", f"모니터링 주기 변경, 타이머 재시작")
+            continue
         tax_log("i", "", f"시간 경과, 모니터링 시작")
         manager.check_all()
 
@@ -1300,6 +1559,13 @@ def set_tray_icon(image_path):
 
 # --- 메인 실행 ---
 if __name__ == "__main__":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor DPI Aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # fallback (Vista+)
+        except Exception:
+            pass
     asciiart()
     add_to_startup()
     get_config()
@@ -1318,11 +1584,47 @@ if __name__ == "__main__":
     tray_icon.icon = Image.open(ICON).resize((32, 32))
     tray_icon.title = "TaxBoardWatcher"
 
+    def _make_interval_item(h):
+        return pystray.MenuItem(
+            f'{h}시간',
+            lambda: set_sleep_hour(h),
+            checked=lambda item: SLEEP_TIME == h * 3600,
+            radio=True,
+        )
+    interval_submenu = pystray.Menu(*[_make_interval_item(h) for h in [1, 2, 3, 4, 6, 12, 24]])
+
+    def _test_notify(kind):
+        if kind == "start":
+            threading.Thread(
+                target=lambda: send_notification("", "start"),
+                daemon=True,
+            ).start()
+        else:
+            threading.Thread(
+                target=lambda: send_notification(
+                    "홈택스",
+                    "테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 ",
+                    url="https://hometax.go.kr",
+                    site_key="hometax",
+                ),
+                daemon=True,
+            ).start()
+
+    test_submenu = pystray.Menu(
+        pystray.MenuItem('시작 알림', lambda: _test_notify("start")),
+        pystray.MenuItem('새 게시물 알림', lambda: _test_notify("new")),
+    )
+
     tray_icon.menu = pystray.Menu(
-        pystray.MenuItem('✔ 게시물 목록', show_board_overview),
-        pystray.MenuItem('▶ 모니터링 실행', manual_crawl),
-        pystray.MenuItem('✱ 로그 열기', open_log_file),
-        pystray.MenuItem('⏻ 종료', on_exit),
-   
+        pystray.MenuItem(f'TaxBoardWatcher  {VERSION}', None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('게시물 목록', show_board_overview),
+        pystray.MenuItem('모니터링 실행', manual_crawl),
+        pystray.MenuItem('모니터링 주기', interval_submenu),
+        pystray.MenuItem('로그 열기', open_log_file),
+        # pystray.Menu.SEPARATOR,
+        # pystray.MenuItem('알림 테스트', test_submenu),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('종료', on_exit),
     )
     tray_icon.run()
