@@ -1,16 +1,19 @@
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from PIL import Image, ImageDraw, ImageTk
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from win32com.client import Dispatch
 from urllib.parse import urlencode
-from PIL import Image, ImageDraw, ImageTk
-from io import BytesIO
 from selenium import webdriver
 from bs4 import BeautifulSoup
 from html import escape
+from io import BytesIO
 import tkinter as tk
 import webbrowser
 import threading
@@ -18,6 +21,8 @@ import datetime
 import requests
 import pystray
 import ctypes
+import random
+import queue
 import json
 import time
 import sys
@@ -29,7 +34,7 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.5.0.0"
+VERSION = "v.5.0.1"
 
 BOARD_DATA = "data/board_data.json"
 LOG = "data/log.txt"
@@ -80,6 +85,22 @@ tray_icon = None  # 전역 tray_icon 변수
 
 _logo_pil_cache: dict = {}  # site_key -> PIL.Image | None
 _interval_changed = threading.Event()  # 모니터링 주기 변경 시 sleep 중단용
+_notify_queue = queue.Queue()  # 새 글 알림을 순차 표시하기 위한 큐
+
+def enqueue_notification(*args, **kwargs):
+    """새 글 알림을 큐에 넣는다. 모니터링 스레드가 알림창 대기(mainloop)로 멈추지 않도록 한다."""
+    _notify_queue.put((args, kwargs))
+
+def _notification_worker():
+    """알림 큐를 소비해 한 번에 하나씩 알림창을 표시하는 전용 스레드."""
+    while True:
+        args, kwargs = _notify_queue.get()
+        try:
+            send_notification(*args, **kwargs)
+        except Exception as e:
+            tax_log("e", "", f"알림 표시 오류: {e}")
+        finally:
+            _notify_queue.task_done()
 
 def get_base_dir() -> str:
     """실행 환경(스크립트/PyInstaller exe)에 관계없이 프로그램 루트 디렉토리를 반환."""
@@ -194,7 +215,7 @@ def notify_manual_monitor_toast(title: str, msg: str, *, error: bool = False):
         tax_log("e", "", f"Windows 토스트 표시 실패: {e}")
 
 
-def send_notification(title, message, url=None, site_key=None):
+def send_notification(title, message, url=None, site_key=None, meta=None):
     BG     = "#ffffff"
     BG_MSG = "#f4f7fb"
     ACCENT = "#0078D7"
@@ -272,6 +293,19 @@ def send_notification(title, message, url=None, site_key=None):
                      font=(FONT, 10), fg=TEXT_S,
                      wraplength=550, justify="left").pack(anchor="w")
 
+            # 날짜 등 부가 정보 (값이 있는 항목만 표시)
+            meta_rows = [(lbl, val) for (lbl, val) in (meta or []) if val]
+            if meta_rows:
+                info = tk.Frame(msg_box, bg=BG_MSG)
+                info.pack(anchor="w", fill="x", pady=(10, 0))
+                for lbl, val in meta_rows:
+                    row = tk.Frame(info, bg=BG_MSG)
+                    row.pack(anchor="w", fill="x", pady=(2, 0))
+                    tk.Label(row, text=lbl, bg=BG_MSG, font=(FONT, 9, "bold"),
+                             fg="#5a6570", width=8, anchor="w").pack(side="left")
+                    tk.Label(row, text=val, bg=BG_MSG, font=(FONT, 9),
+                             fg=TEXT_S, wraplength=480, justify="left").pack(side="left")
+
             # 버튼 (중앙)
             btn_row = tk.Frame(body, bg=BG)
             btn_row.pack()
@@ -332,7 +366,7 @@ BOARD_DATA_SECTIONS = ("hometax", "moef", "moleg", "gwanbo", "mois")
 def _normalize_board_data(data):
     """루트 dict의 모니터링 섹션을 문자열·불완전 dict 등 섞여 있어도 동일 스키마로 통일."""
     if not isinstance(data, dict):
-        return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}}
+        return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}, "mois": {}}
     out = {}
     for k, v in data.items():
         if k not in BOARD_DATA_SECTIONS:
@@ -479,10 +513,10 @@ def load_data():
             if isinstance(mois, dict):
                 data["mois"] = {k: _mois_entry_from_value(v) for k, v in mois.items()}
             return data
-        return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}}
+        return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}, "mois": {}}
     except Exception as e:
         tax_log("e", "", f"파일 로드 오류: {e}")
-        return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}}
+        return {"hometax": {}, "moef": {}, "moleg": {}, "gwanbo": {}, "mois": {}}
 
 # --- 홈택스 스크래핑 ---
 class HomeTaxScraper:
@@ -509,11 +543,20 @@ class HomeTaxScraper:
         try:
             self.init_driver()
             self.driver.get(self.url)
-            time.sleep(3)  # 페이지 로딩 대기
-            
-            # tbody 요소 찾기
-            tbody = self.driver.find_element("css selector", '#mf_txppWframe_grdList_body_tbody')
-            
+
+            # 홈택스는 WebSquare + 보안체크(serviceCheck/permission/token/wqAction) 단계를
+            # 거쳐 그리드가 뜨기까지 ~10초가 걸린다. 고정 sleep 대신 요소가 채워질 때까지 대기.
+            wait = WebDriverWait(self.driver, 30)
+            tbody = wait.until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, '#mf_txppWframe_grdList_body_tbody')
+                )
+            )
+            # tbody가 생겨도 행 데이터가 아직 안 채워질 수 있으므로 최소 1행이 생길 때까지 대기
+            wait.until(
+                lambda d: len(tbody.find_elements(By.CSS_SELECTOR, 'tr')) > 0
+            )
+
             # 모든 tr 요소 찾기
             rows = tbody.find_elements("css selector", 'tr')
             posts = []
@@ -550,8 +593,8 @@ class HomeTaxScraper:
             
             self._fetch_ok = True
             return posts
-        except NoSuchElementException:
-            tax_log("w", "hometax", f"필수 요소를 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.")
+        except (NoSuchElementException, TimeoutException):
+            tax_log("w", "hometax", f"필수 요소를 찾을 수 없습니다(로딩 지연/구조 변경). 30초 내 그리드가 나타나지 않았습니다.")
             return []
         except Exception as e:
             tax_log("e", "hometax", f"모니터링 오류: {e}")
@@ -577,7 +620,10 @@ class HomeTaxScraper:
 
             if post_code not in self.known_posts:
                 tax_log("i", "hometax", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("HomeTax", post_title, self.url, site_key="hometax")
+                enqueue_notification(
+                    "HomeTax", post_title, self.url, site_key="hometax",
+                    meta=[("변경일", post.get("changed_date", ""))],
+                )
                 self.updated = True
 
         if latest_posts:
@@ -649,7 +695,10 @@ class MoefScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "moef", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("기획재정부", post_title, self.url, site_key="moef")
+                enqueue_notification(
+                    "기획재정부", post_title, self.url, site_key="moef",
+                    meta=[("예고기간", post.get("date", "")), ("담당", post.get("depart", ""))],
+                )
                 self.updated = True
 
         if latest_posts:
@@ -727,7 +776,13 @@ class MolegScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "moleg", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("법제처", post_title, self.url, site_key="moleg")
+                sd = (post.get("start_date") or "").strip()
+                ed = (post.get("end_date") or "").strip()
+                period = f"{sd}~{ed}" if sd and ed else (sd or ed)
+                enqueue_notification(
+                    "법제처", post_title, self.url, site_key="moleg",
+                    meta=[("예고기간", period)],
+                )
                 self.updated = True
 
         if latest_posts:
@@ -817,7 +872,10 @@ class GwanboScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "gwanbo", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("대한민국 전자관보", post_title, self.keyword_search_page_url(), site_key="gwanbo")
+                enqueue_notification(
+                    "대한민국 전자관보", post_title, self.keyword_search_page_url(), site_key="gwanbo",
+                    meta=[("발행일", _gwanbo_published_display(post.get("published_date", "")))],
+                )
                 self.updated = True
 
         if latest_posts:
@@ -890,7 +948,10 @@ class MoisScraper:
             }
             if post_code not in self.known_posts:
                 tax_log("i", "mois", f"새 글 발견: {post_title} (코드: {post_code})")
-                send_notification("행정안전부", post_title, self.keyword_search_page_url(), site_key="mois")
+                enqueue_notification(
+                    "행정안전부", post_title, self.keyword_search_page_url(), site_key="mois",
+                    meta=[("등록일", post.get("date", ""))],
+                )
                 self.updated = True
 
         if latest_posts:
@@ -1577,6 +1638,9 @@ if __name__ == "__main__":
     send_notification("TaxBoardWatcher","start") # 최초 실행 알림창
     manager = ScraperManager()
 
+    notify_thread = threading.Thread(target=_notification_worker, daemon=True)
+    notify_thread.start()
+
     monitor_thread = threading.Thread(target=run_monitor, daemon=True)
     monitor_thread.start()
 
@@ -1600,12 +1664,21 @@ if __name__ == "__main__":
                 daemon=True,
             ).start()
         else:
+            _TEST_SITES = [
+                ("HomeTax",           "https://hometax.go.kr", "hometax"),
+                ("기획재정부",        "https://www.moef.go.kr/lw/lap/TbPrvntcList.do?bbsId=MOSFBBS_000000000055&menuNo=7050300&searchCondition3=1&searchKeyword3=%EC%86%8C%EB%93%9D%EC%84%B8", "moef"),
+                ("법제처",            "https://www.moleg.go.kr/lawinfo/makingList.mo?mid=a10104010000&pageCnt=10&lsClsCd=&cptOfiOrgCd=&keyField=lmNm&keyWord=%EC%86%8C%EB%93%9D%EC%84%B8%EB%B2%95&stYdFmt=&edYdFmt=", "moleg"),
+                ("대한민국 전자관보", "https://gwanbo.go.kr/user/search/searchKeyword.do?pKeyword=%EC%86%8C%EB%93%9D%EC%84%B8%EB%B2%95", "gwanbo"),
+                ("행정안전부",        "https://www.mois.go.kr/frt/bbs/type001/commonSelectBoardList.do?bbsId=BBSMSTR_000000000052", "mois"),
+            ]
+            _title, _url, _site_key = random.choice(_TEST_SITES)
             threading.Thread(
-                target=lambda: send_notification(
-                    "홈택스",
-                    "테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 테 스 트 ",
-                    url="https://hometax.go.kr",
-                    site_key="hometax",
+                target=lambda t=_title, u=_url, sk=_site_key: send_notification(
+                    t,
+                    "이 프로그램은 국세청, 기획재정부 등 정부의 주요 기관의 게시판을 정해진 주기마다 자동으로 확인하여 새 게시물이 등록되면 사용자에게 알림을 제공합니다.",
+                    url=u,
+                    site_key=sk,
+                    meta=[("등록일", datetime.datetime.now().strftime("%Y-%m-%d"))],
                 ),
                 daemon=True,
             ).start()
@@ -1622,8 +1695,8 @@ if __name__ == "__main__":
         pystray.MenuItem('모니터링 실행', manual_crawl),
         pystray.MenuItem('모니터링 주기', interval_submenu),
         pystray.MenuItem('로그 열기', open_log_file),
-        # pystray.Menu.SEPARATOR,
-        # pystray.MenuItem('알림 테스트', test_submenu),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('알림 테스트', test_submenu),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('종료', on_exit),
     )
