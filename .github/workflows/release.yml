@@ -1,0 +1,45 @@
+# v* 태그를 push하면 exe를 빌드해 GitHub Release에 올린다.
+# 사용자 PC의 TaxBoardWatcher가 이 Release(latest)의 TaxBoardWatcher.exe를 받아 자동 업데이트한다.
+#   git tag v5.0.2 && git push origin v5.0.2
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 태그와 VERSION 일치 확인
+        shell: python
+        run: |
+          import os, re, sys
+          src = open("TaxBoardWatcher.py", encoding="utf-8").read()
+          version = re.search(r'^VERSION\s*=\s*"([^"]+)"', src, re.M).group(1)
+          tag = os.environ["GITHUB_REF_NAME"]
+          nums = lambda s: re.findall(r"\d+", s)
+          if nums(version) != nums(tag):
+              sys.exit(f"태그({tag})와 TaxBoardWatcher.py VERSION({version})이 다릅니다.")
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: exe 빌드
+        run: pyinstaller --noconsole --onefile --name TaxBoardWatcher TaxBoardWatcher.py
+
+      - name: Release 생성
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/TaxBoardWatcher.exe
+          generate_release_notes: true

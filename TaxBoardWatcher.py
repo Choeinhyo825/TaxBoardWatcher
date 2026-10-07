@@ -34,7 +34,12 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.5.0.1"
+VERSION = "v.5.0.2"
+
+# --- 자동 업데이트(GitHub Releases) ---
+GITHUB_REPO = "Choeinhyo825/TaxBoardWatcher"
+UPDATE_ASSET_NAME = "TaxBoardWatcher.exe"
+UPDATE_CHECK_INTERVAL = 12 * 60 * 60  # 자동 업데이트 확인 최소 간격(12시간)
 
 BOARD_DATA = "data/board_data.json"
 LOG = "data/log.txt"
@@ -525,6 +530,9 @@ class HomeTaxScraper:
         # ChromeOptions 설정
         chrome_options = Options()
         chrome_options.add_argument("--headless")
+        # 기본 headless 창(800x600)에서는 그리드 우측 컬럼(변경일 등)이 overflow:hidden으로 잘려
+        # Selenium .text가 빈 문자열을 반환하므로 창을 넓게 띄운다.
+        chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         # ChromeDriverManager에서 설치된 드라이버 경로 가져오기
@@ -560,20 +568,17 @@ class HomeTaxScraper:
             # 모든 tr 요소 찾기
             rows = tbody.find_elements("css selector", 'tr')
             posts = []
-            
+
+            # .text는 화면에 보이는 텍스트만 반환하므로(잘린 셀은 ''), 표시 여부와 무관한 textContent를 읽는다.
+            def cell_text(row, colindex, tag):
+                td = row.find_element("css selector", f'td[data-colindex="{colindex}"]')
+                return (td.find_element("css selector", tag).get_attribute("textContent") or "").strip()
+
             for row in rows:
                 try:
-                    # code값 (data-colindex="0"인 td의 nobr 텍스트)
-                    code_td = row.find_element("css selector", 'td[data-colindex="0"]')
-                    code = code_td.find_element("css selector", 'nobr').text.strip()
-                    
-                    # title값 (data-colindex="2"인 td의 a 텍스트)
-                    title_td = row.find_element("css selector", 'td[data-colindex="2"]')
-                    title = title_td.find_element("css selector", 'a').text.strip()
-                    
-                    # 변경일 (data-colindex="4"인 td의 nobr 텍스트)
-                    date_td = row.find_element("css selector", 'td[data-colindex="4"]')
-                    date_raw = date_td.find_element("css selector", 'nobr').text.strip()
+                    code = cell_text(row, 0, 'nobr')        # 번호
+                    title = cell_text(row, 2, 'a')          # 제목
+                    date_raw = cell_text(row, 4, 'nobr')    # 변경일
                     date_digits = re.sub(r"\D", "", date_raw)
                     if len(date_digits) < 8:
                         tax_log("w", "hometax", f"변경일 파싱 생략(형식 불명): 번호={code!r} raw={date_raw!r}")
@@ -590,7 +595,13 @@ class HomeTaxScraper:
                     )
                 except Exception as e:
                     tax_log("e", "hometax", f"행 파싱 오류: {e}")
-            
+
+            # 행은 있는데 하나도 파싱되지 않았다면 구조 변경 등으로 수집이 실패한 것이다.
+            # 이를 성공으로 처리하면 "새로운 글이 없습니다"로 오인되어 감지가 멈춘 줄 모르게 된다.
+            if rows and not posts:
+                tax_log("w", "hometax", f"목록 {len(rows)}행 중 파싱된 글이 없습니다. 조회 실패로 처리합니다.")
+                return []
+
             self._fetch_ok = True
             return posts
         except (NoSuchElementException, TimeoutException):
@@ -1538,12 +1549,149 @@ def on_exit(icon, item):
     icon.stop()
     os._exit(0)
 
+# --- 자동 업데이트 ---
+_pending_update = None       # {"version", "url", "size"} — 설치 가능한 새 버전
+_update_notified = None      # 토스트로 이미 안내한 버전(같은 버전 반복 안내 방지)
+_last_update_check = 0.0
+_update_lock = threading.Lock()
+
+
+def _parse_version(s):
+    """'v.5.0.2' / 'v5.0.2' 등을 (5, 0, 2)로 변환."""
+    return tuple(int(n) for n in re.findall(r"\d+", s or ""))
+
+
+def check_for_update(manual=False):
+    """GitHub 최신 릴리스를 조회해 현재 버전보다 높으면 설치 대기 상태로 둔다."""
+    global _pending_update, _update_notified, _last_update_check
+    if not _update_lock.acquire(blocking=False):
+        return
+    try:
+        _last_update_check = time.time()
+        api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        resp = requests.get(api, headers={"Accept": "application/vnd.github+json"}, timeout=15)
+        if resp.status_code != 200:
+            raise RuntimeError(f"릴리스 조회 실패(HTTP {resp.status_code})")
+        release = resp.json()
+        latest = release.get("tag_name", "")
+        asset = next((a for a in release.get("assets", []) if a.get("name") == UPDATE_ASSET_NAME), None)
+
+        if not asset or _parse_version(latest) <= _parse_version(VERSION):
+            _pending_update = None
+            if manual:
+                notify_manual_monitor_toast("업데이트 확인", f"최신 버전을 사용 중입니다. ({VERSION})")
+            return
+
+        _pending_update = {
+            "version": latest,
+            "url": asset["browser_download_url"],
+            "size": asset.get("size", 0),
+        }
+        tax_log("i", "", f"새 버전 발견: {latest} (현재 {VERSION})")
+        if tray_icon is not None:
+            tray_icon.update_menu()
+        if manual or _update_notified != latest:
+            _update_notified = latest
+            notify_manual_monitor_toast(
+                "새 버전이 있습니다",
+                f"{latest} 업데이트가 있습니다. 트레이 메뉴의 '업데이트 설치'를 눌러 주세요.",
+            )
+    except Exception as e:
+        tax_log("w", "", f"업데이트 확인 실패: {e}")
+        if manual:
+            notify_manual_monitor_toast("업데이트 확인 실패", str(e), error=True)
+    finally:
+        _update_lock.release()
+
+
+def check_for_update_if_due():
+    """모니터링 주기마다 호출. 마지막 확인 후 UPDATE_CHECK_INTERVAL이 지났을 때만 조회한다."""
+    if time.time() - _last_update_check >= UPDATE_CHECK_INTERVAL:
+        check_for_update()
+
+
+def _ps_quote(s):
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def apply_update():
+    """새 exe를 내려받아 두고, 프로그램 종료 후 교체·재시작하는 PowerShell을 띄운 뒤 종료한다.
+    실행 중인 exe는 자기 자신을 덮어쓸 수 없으므로 교체는 외부 프로세스가 담당한다.
+    data/ 폴더(게시글 데이터·설정·로그)는 건드리지 않는다."""
+    upd = _pending_update
+    if not upd:
+        return
+    if not getattr(sys, "frozen", False):
+        notify_manual_monitor_toast("업데이트 불가", "exe로 실행 중일 때만 자동 업데이트할 수 있습니다.", error=True)
+        return
+
+    exe_path = sys.executable
+    base_dir = os.path.dirname(exe_path)
+    new_path = exe_path + ".new"
+    try:
+        tax_log("i", "", f"업데이트 다운로드 시작: {upd['version']}")
+        with requests.get(upd["url"], stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(new_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 256):
+                    f.write(chunk)
+        size = os.path.getsize(new_path)
+        with open(new_path, "rb") as f:
+            is_exe = f.read(2) == b"MZ"
+        if not is_exe or (upd["size"] and size != upd["size"]):
+            raise RuntimeError(f"다운로드 파일 검증 실패(size={size})")
+    except Exception as e:
+        tax_log("e", "", f"업데이트 다운로드 실패: {e}")
+        notify_manual_monitor_toast("업데이트 실패", str(e), error=True)
+        try:
+            os.remove(new_path)
+        except OSError:
+            pass
+        return
+
+    # PyInstaller onefile은 부트로더(부모)와 파이썬(자식) 두 프로세스가 exe를 잡고 있으므로 둘 다 종료를 기다린다.
+    pids = ",".join(str(p) for p in {os.getpid(), os.getppid()})
+    script = f"""
+$ErrorActionPreference = 'SilentlyContinue'
+Wait-Process -Id {pids} -Timeout 60
+$ok = $false
+for ($i = 0; $i -lt 30; $i++) {{
+    try {{ Move-Item -LiteralPath {_ps_quote(new_path)} -Destination {_ps_quote(exe_path)} -Force -ErrorAction Stop; $ok = $true; break }}
+    catch {{ Start-Sleep -Seconds 1 }}
+}}
+Start-Process -FilePath {_ps_quote(exe_path)} -WorkingDirectory {_ps_quote(base_dir)}
+"""
+    import base64
+    import subprocess
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded]
+    # DETACHED_PROCESS로 띄우면 PowerShell이 콘솔 없이 시작돼 바로 종료되므로 CREATE_NO_WINDOW만 쓴다.
+    flags = subprocess.CREATE_NO_WINDOW
+    # 이 프로세스가 job object에 속해 있으면 종료 시 자식도 함께 정리되므로 job에서 분리해 띄운다.
+    try:
+        subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, close_fds=True)
+    except OSError:
+        subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+    tax_log("i", "", f"업데이트 설치를 위해 종료합니다: {VERSION} -> {upd['version']}")
+    if tray_icon is not None:
+        tray_icon.stop()
+    os._exit(0)
+
+
+def on_update_menu(icon, item):
+    """트레이 메뉴: 설치 대기 중인 버전이 있으면 설치, 없으면 수동 확인."""
+    if _pending_update:
+        threading.Thread(target=apply_update, daemon=True).start()
+    else:
+        threading.Thread(target=check_for_update, kwargs={"manual": True}, daemon=True).start()
+
 # --- 모니터링 쓰레드 ---
 def run_monitor():
     global tray_icon
     # 최초 실행시 즉시 한 번 체크
     tax_log("i", "", f"프로그램 시작, 최초 모니터링 실행")
     manager.check_all()
+    check_for_update_if_due()
     while True:
         next_check_time = datetime.datetime.now() + datetime.timedelta(seconds=SLEEP_TIME)
         tax_log("i", "", f"다음 모니터링 예정 시간: {next_check_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1556,6 +1704,7 @@ def run_monitor():
             continue
         tax_log("i", "", f"시간 경과, 모니터링 시작")
         manager.check_all()
+        check_for_update_if_due()
 
 # --- 시작프로그램'에 바로가기(.lnk) 파일 생성(최초 1회만 생성) --- 
 def add_to_startup():
@@ -1697,6 +1846,10 @@ if __name__ == "__main__":
         pystray.MenuItem('로그 열기', open_log_file),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('알림 테스트', test_submenu),
+        pystray.MenuItem(
+            lambda item: f"업데이트 설치 ({_pending_update['version']})" if _pending_update else '업데이트 확인',
+            on_update_menu,
+        ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('종료', on_exit),
     )
