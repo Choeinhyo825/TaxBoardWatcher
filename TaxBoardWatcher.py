@@ -34,7 +34,7 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.5.0.2"
+VERSION = "v.5.0.3"
 
 # --- 자동 업데이트(GitHub Releases) ---
 GITHUB_REPO = "Choeinhyo825/TaxBoardWatcher"
@@ -1550,8 +1550,6 @@ def on_exit(icon, item):
     os._exit(0)
 
 # --- 자동 업데이트 ---
-_pending_update = None       # {"version", "url", "size"} — 설치 가능한 새 버전
-_update_notified = None      # 토스트로 이미 안내한 버전(같은 버전 반복 안내 방지)
 _last_update_check = 0.0
 _update_lock = threading.Lock()
 
@@ -1562,8 +1560,8 @@ def _parse_version(s):
 
 
 def check_for_update(manual=False):
-    """GitHub 최신 릴리스를 조회해 현재 버전보다 높으면 설치 대기 상태로 둔다."""
-    global _pending_update, _update_notified, _last_update_check
+    """GitHub 최신 릴리스를 조회해 현재 버전보다 높으면 바로 설치한다."""
+    global _last_update_check
     if not _update_lock.acquire(blocking=False):
         return
     try:
@@ -1577,25 +1575,26 @@ def check_for_update(manual=False):
         asset = next((a for a in release.get("assets", []) if a.get("name") == UPDATE_ASSET_NAME), None)
 
         if not asset or _parse_version(latest) <= _parse_version(VERSION):
-            _pending_update = None
             if manual:
                 notify_manual_monitor_toast("업데이트 확인", f"최신 버전을 사용 중입니다. ({VERSION})")
             return
 
-        _pending_update = {
+        tax_log("i", "", f"새 버전 발견: {latest} (현재 {VERSION})")
+        if not getattr(sys, "frozen", False):
+            # 스크립트(python) 실행 중에는 교체할 exe가 없으므로 안내만 한다.
+            if manual:
+                notify_manual_monitor_toast("업데이트 확인", f"새 버전 {latest}이 있습니다. (exe 실행 시에만 자동 설치)")
+            return
+
+        # 새 글 알림이 표시 대기/표시 중이면 끝날 때까지 기다린다.
+        # (이미 저장된 글이라 재시작 후에는 다시 알리지 않으므로, 먼저 종료하면 알림이 유실된다)
+        _notify_queue.join()
+        notify_manual_monitor_toast("업데이트", f"{latest}로 업데이트합니다. 잠시 후 다시 실행됩니다.")
+        apply_update({
             "version": latest,
             "url": asset["browser_download_url"],
             "size": asset.get("size", 0),
-        }
-        tax_log("i", "", f"새 버전 발견: {latest} (현재 {VERSION})")
-        if tray_icon is not None:
-            tray_icon.update_menu()
-        if manual or _update_notified != latest:
-            _update_notified = latest
-            notify_manual_monitor_toast(
-                "새 버전이 있습니다",
-                f"{latest} 업데이트가 있습니다. 트레이 메뉴의 '업데이트 설치'를 눌러 주세요.",
-            )
+        })
     except Exception as e:
         tax_log("w", "", f"업데이트 확인 실패: {e}")
         if manual:
@@ -1614,17 +1613,10 @@ def _ps_quote(s):
     return "'" + str(s).replace("'", "''") + "'"
 
 
-def apply_update():
+def apply_update(upd):
     """새 exe를 내려받아 두고, 프로그램 종료 후 교체·재시작하는 PowerShell을 띄운 뒤 종료한다.
     실행 중인 exe는 자기 자신을 덮어쓸 수 없으므로 교체는 외부 프로세스가 담당한다.
     data/ 폴더(게시글 데이터·설정·로그)는 건드리지 않는다."""
-    upd = _pending_update
-    if not upd:
-        return
-    if not getattr(sys, "frozen", False):
-        notify_manual_monitor_toast("업데이트 불가", "exe로 실행 중일 때만 자동 업데이트할 수 있습니다.", error=True)
-        return
-
     exe_path = sys.executable
     base_dir = os.path.dirname(exe_path)
     new_path = exe_path + ".new"
@@ -1667,11 +1659,15 @@ Start-Process -FilePath {_ps_quote(exe_path)} -WorkingDirectory {_ps_quote(base_
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded]
     # DETACHED_PROCESS로 띄우면 PowerShell이 콘솔 없이 시작돼 바로 종료되므로 CREATE_NO_WINDOW만 쓴다.
     flags = subprocess.CREATE_NO_WINDOW
+    # PyInstaller onefile의 환경변수(_PYI_*, _MEIPASS2)를 물려받으면 새 exe가 이미 삭제된 이전 _MEI 폴더를
+    # 사용하려다 "Failed to load Python DLL"로 실패하므로, 새 인스턴스로 시작하도록 환경을 초기화한다.
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(("_PYI_", "_MEIPASS2"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     # 이 프로세스가 job object에 속해 있으면 종료 시 자식도 함께 정리되므로 job에서 분리해 띄운다.
     try:
-        subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, close_fds=True)
+        subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, close_fds=True, env=env)
     except OSError:
-        subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+        subprocess.Popen(cmd, creationflags=flags, close_fds=True, env=env)
     tax_log("i", "", f"업데이트 설치를 위해 종료합니다: {VERSION} -> {upd['version']}")
     if tray_icon is not None:
         tray_icon.stop()
@@ -1679,11 +1675,8 @@ Start-Process -FilePath {_ps_quote(exe_path)} -WorkingDirectory {_ps_quote(base_
 
 
 def on_update_menu(icon, item):
-    """트레이 메뉴: 설치 대기 중인 버전이 있으면 설치, 없으면 수동 확인."""
-    if _pending_update:
-        threading.Thread(target=apply_update, daemon=True).start()
-    else:
-        threading.Thread(target=check_for_update, kwargs={"manual": True}, daemon=True).start()
+    """트레이 메뉴: 즉시 업데이트 확인(새 버전이 있으면 바로 설치)."""
+    threading.Thread(target=check_for_update, kwargs={"manual": True}, daemon=True).start()
 
 # --- 모니터링 쓰레드 ---
 def run_monitor():
@@ -1846,10 +1839,7 @@ if __name__ == "__main__":
         pystray.MenuItem('로그 열기', open_log_file),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('알림 테스트', test_submenu),
-        pystray.MenuItem(
-            lambda item: f"업데이트 설치 ({_pending_update['version']})" if _pending_update else '업데이트 확인',
-            on_update_menu,
-        ),
+        pystray.MenuItem('업데이트 확인', on_update_menu),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('종료', on_exit),
     )
