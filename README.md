@@ -19,6 +19,18 @@ pyinstaller --noconsole --onefile TaxBoardWatcher.py
 C:\Users\사용자명\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
 ```
 
+### 배포 (자동 업데이트)
+`v*` 태그를 push하면 GitHub Actions([.github/workflows/release.yml](.github/workflows/release.yml))가 exe를 빌드해 Release에 올리고,
+사용자 PC의 프로그램이 최신 Release를 확인해 트레이 메뉴에서 업데이트합니다.
+```sh
+# 1. TaxBoardWatcher.py 의 VERSION 과 dist/readme.txt 변경 이력 수정 후 커밋
+# 2. 태그 push (태그와 VERSION 숫자가 다르면 빌드가 실패함)
+git tag v5.0.2
+git push origin master v5.0.2
+```
+- Release 자산 이름은 `TaxBoardWatcher.exe` 여야 합니다(앱이 이 이름으로 찾음).
+- 저장소가 public 이어야 사용자 PC가 토큰 없이 Release 를 받을 수 있습니다.
+
 ### update 내역
 dist/readme.txt 를 참고 하세요.
 
