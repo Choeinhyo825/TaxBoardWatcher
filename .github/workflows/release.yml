@@ -35,8 +35,9 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
+      # dist/data의 아이콘·로고·기본 설정을 exe에 포함한다(실행 시 data/에 없는 파일만 풀어 놓음).
       - name: exe 빌드
-        run: pyinstaller --noconsole --onefile --name TaxBoardWatcher TaxBoardWatcher.py
+        run: pyinstaller --noconsole --onefile --name TaxBoardWatcher --add-data "dist/data/*.png;default_data" --add-data "dist/data/config.json;default_data" TaxBoardWatcher.py
 
       - name: Release 생성
         uses: softprops/action-gh-release@v2
