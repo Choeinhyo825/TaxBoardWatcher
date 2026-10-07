@@ -23,6 +23,7 @@ import pystray
 import ctypes
 import random
 import queue
+import shutil
 import json
 import time
 import sys
@@ -34,7 +35,7 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.5.0.3"
+VERSION = "v.5.0.4"
 
 # --- 자동 업데이트(GitHub Releases) ---
 GITHUB_REPO = "Choeinhyo825/TaxBoardWatcher"
@@ -113,6 +114,21 @@ def get_base_dir() -> str:
         # PyInstaller --onefile: sys.executable = 실제 .exe 경로
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+def ensure_data_files():
+    """exe에 포함된 기본 data 파일(아이콘·로고·설정) 중 data/에 없는 것만 풀어 놓는다.
+    exe 하나만 받아 처음 실행하는 경우와, 업데이트로 새 파일이 추가된 경우를 위해서다.
+    이미 있는 파일(사용자 설정 등)은 덮어쓰지 않는다."""
+    os.makedirs("data", exist_ok=True)
+    if not getattr(sys, "frozen", False):
+        return
+    src_dir = os.path.join(sys._MEIPASS, "default_data")
+    if not os.path.isdir(src_dir):
+        return
+    for name in os.listdir(src_dir):
+        dst = os.path.join("data", name)
+        if not os.path.exists(dst):
+            shutil.copyfile(os.path.join(src_dir, name), dst)
 
 def _load_logo_photo(site_key: str, max_h: int = 38):
     if site_key not in _logo_pil_cache:
@@ -618,6 +634,8 @@ class HomeTaxScraper:
     def check_update(self):
         self.updated = False
         posts = self.fetch_latest_posts()
+        # 저장된 목록이 없으면(최초 실행) 현재 목록을 기준으로만 저장하고 알림은 생략한다.
+        first_run = not self.known_posts
         
         latest_posts = {}
         for post in posts:
@@ -630,13 +648,16 @@ class HomeTaxScraper:
             }
 
             if post_code not in self.known_posts:
-                tax_log("i", "hometax", f"새 글 발견: {post_title} (코드: {post_code})")
-                enqueue_notification(
-                    "HomeTax", post_title, self.url, site_key="hometax",
-                    meta=[("변경일", post.get("changed_date", ""))],
-                )
+                if not first_run:
+                    tax_log("i", "hometax", f"새 글 발견: {post_title} (코드: {post_code})")
+                    enqueue_notification(
+                        "HomeTax", post_title, self.url, site_key="hometax",
+                        meta=[("변경일", post.get("changed_date", ""))],
+                    )
                 self.updated = True
 
+        if first_run and latest_posts:
+            tax_log("i", "hometax", f"최초 실행: 현재 목록 {len(latest_posts)}건을 기준으로 저장했습니다(알림 생략).")
         if latest_posts:
             self.known_posts = latest_posts
         if self._fetch_ok and not self.updated:
@@ -694,6 +715,8 @@ class MoefScraper:
     def check_update(self):
         self.updated = False
         posts = self.fetch_latest_posts()
+        # 저장된 목록이 없으면(최초 실행) 현재 목록을 기준으로만 저장하고 알림은 생략한다.
+        first_run = not self.known_posts
 
         latest_posts = {}
         for post in posts:
@@ -705,13 +728,16 @@ class MoefScraper:
                 "depart": post.get("depart", ""),
             }
             if post_code not in self.known_posts:
-                tax_log("i", "moef", f"새 글 발견: {post_title} (코드: {post_code})")
-                enqueue_notification(
-                    "기획재정부", post_title, self.url, site_key="moef",
-                    meta=[("예고기간", post.get("date", "")), ("담당", post.get("depart", ""))],
-                )
+                if not first_run:
+                    tax_log("i", "moef", f"새 글 발견: {post_title} (코드: {post_code})")
+                    enqueue_notification(
+                        "기획재정부", post_title, self.url, site_key="moef",
+                        meta=[("예고기간", post.get("date", "")), ("담당", post.get("depart", ""))],
+                    )
                 self.updated = True
 
+        if first_run and latest_posts:
+            tax_log("i", "moef", f"최초 실행: 현재 목록 {len(latest_posts)}건을 기준으로 저장했습니다(알림 생략).")
         if latest_posts:
             self.known_posts = latest_posts
         if self._fetch_ok and not self.updated:
@@ -773,6 +799,8 @@ class MolegScraper:
     def check_update(self):
         self.updated = False
         posts = self.fetch_latest_posts()
+        # 저장된 목록이 없으면(최초 실행) 현재 목록을 기준으로만 저장하고 알림은 생략한다.
+        first_run = not self.known_posts
         
         latest_posts = {}
         for post in posts:
@@ -786,16 +814,19 @@ class MolegScraper:
                 "end_date": post.get("end_date", ""),
             }
             if post_code not in self.known_posts:
-                tax_log("i", "moleg", f"새 글 발견: {post_title} (코드: {post_code})")
-                sd = (post.get("start_date") or "").strip()
-                ed = (post.get("end_date") or "").strip()
-                period = f"{sd}~{ed}" if sd and ed else (sd or ed)
-                enqueue_notification(
-                    "법제처", post_title, self.url, site_key="moleg",
-                    meta=[("예고기간", period)],
-                )
+                if not first_run:
+                    tax_log("i", "moleg", f"새 글 발견: {post_title} (코드: {post_code})")
+                    sd = (post.get("start_date") or "").strip()
+                    ed = (post.get("end_date") or "").strip()
+                    period = f"{sd}~{ed}" if sd and ed else (sd or ed)
+                    enqueue_notification(
+                        "법제처", post_title, self.url, site_key="moleg",
+                        meta=[("예고기간", period)],
+                    )
                 self.updated = True
 
+        if first_run and latest_posts:
+            tax_log("i", "moleg", f"최초 실행: 현재 목록 {len(latest_posts)}건을 기준으로 저장했습니다(알림 생략).")
         if latest_posts:
             self.known_posts = latest_posts
         if self._fetch_ok and not self.updated:
@@ -872,6 +903,8 @@ class GwanboScraper:
     def check_update(self):
         self.updated = False
         posts = self.fetch_latest_posts()
+        # 저장된 목록이 없으면(최초 실행) 현재 목록을 기준으로만 저장하고 알림은 생략한다.
+        first_run = not self.known_posts
         
         latest_posts = {}
         for post in posts:
@@ -882,13 +915,16 @@ class GwanboScraper:
                 "published_date": post.get("published_date", ""),
             }
             if post_code not in self.known_posts:
-                tax_log("i", "gwanbo", f"새 글 발견: {post_title} (코드: {post_code})")
-                enqueue_notification(
-                    "대한민국 전자관보", post_title, self.keyword_search_page_url(), site_key="gwanbo",
-                    meta=[("발행일", _gwanbo_published_display(post.get("published_date", "")))],
-                )
+                if not first_run:
+                    tax_log("i", "gwanbo", f"새 글 발견: {post_title} (코드: {post_code})")
+                    enqueue_notification(
+                        "대한민국 전자관보", post_title, self.keyword_search_page_url(), site_key="gwanbo",
+                        meta=[("발행일", _gwanbo_published_display(post.get("published_date", "")))],
+                    )
                 self.updated = True
 
+        if first_run and latest_posts:
+            tax_log("i", "gwanbo", f"최초 실행: 현재 목록 {len(latest_posts)}건을 기준으로 저장했습니다(알림 생략).")
         if latest_posts:
             self.known_posts = latest_posts
         if self._fetch_ok and not self.updated:
@@ -948,6 +984,8 @@ class MoisScraper:
     def check_update(self):
         self.updated = False
         posts = self.fetch_latest_posts()
+        # 저장된 목록이 없으면(최초 실행) 현재 목록을 기준으로만 저장하고 알림은 생략한다.
+        first_run = not self.known_posts
 
         latest_posts = {}
         for post in posts:
@@ -958,13 +996,16 @@ class MoisScraper:
                 "date": post.get("date", ""),
             }
             if post_code not in self.known_posts:
-                tax_log("i", "mois", f"새 글 발견: {post_title} (코드: {post_code})")
-                enqueue_notification(
-                    "행정안전부", post_title, self.keyword_search_page_url(), site_key="mois",
-                    meta=[("등록일", post.get("date", ""))],
-                )
+                if not first_run:
+                    tax_log("i", "mois", f"새 글 발견: {post_title} (코드: {post_code})")
+                    enqueue_notification(
+                        "행정안전부", post_title, self.keyword_search_page_url(), site_key="mois",
+                        meta=[("등록일", post.get("date", ""))],
+                    )
                 self.updated = True
 
+        if first_run and latest_posts:
+            tax_log("i", "mois", f"최초 실행: 현재 목록 {len(latest_posts)}건을 기준으로 저장했습니다(알림 생략).")
         if latest_posts:
             self.known_posts = latest_posts
         if self._fetch_ok and not self.updated:
@@ -1769,13 +1810,15 @@ if __name__ == "__main__":
             ctypes.windll.user32.SetProcessDPIAware()  # fallback (Vista+)
         except Exception:
             pass
+    ensure_data_files()
     asciiart()
     add_to_startup()
     get_config()
     if not os.path.exists(LOG):
         open(LOG, "w", encoding="utf-8").close()
     if not os.path.exists(BOARD_DATA):
-        open(BOARD_DATA, "w", encoding="utf-8").close()
+        with open(BOARD_DATA, "w", encoding="utf-8") as f:
+            f.write("{}")
 
     send_notification("TaxBoardWatcher","start") # 최초 실행 알림창
     manager = ScraperManager()
