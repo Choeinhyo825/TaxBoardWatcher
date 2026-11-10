@@ -35,12 +35,12 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.5.0.4"
+VERSION = "v.5.0.5"
 
 # --- 자동 업데이트(GitHub Releases) ---
 GITHUB_REPO = "Choeinhyo825/TaxBoardWatcher"
 UPDATE_ASSET_NAME = "TaxBoardWatcher.exe"
-UPDATE_CHECK_INTERVAL = 12 * 60 * 60  # 자동 업데이트 확인 최소 간격(12시간)
+UPDATE_CHECK_INTERVAL = 6 * 60 * 60  # 자동 업데이트 확인 최소 간격(6시간, 최초 실행 시 1회 + 이후 모니터링 완료 시점에 확인)
 
 BOARD_DATA = "data/board_data.json"
 LOG = "data/log.txt"
@@ -160,11 +160,16 @@ def get_config():
     try:
         with open(CONFIG, "r", encoding="utf-8") as f:
             config = json.load(f)
-            sleep_hour = config.get("sleep_hour")
-            if isinstance(sleep_hour, int) and sleep_hour >= 0:
+            raw = config.get("sleep_hour")
+            try:
+                sleep_hour = int(raw)  # "2" 같은 문자열도 숫자로 변환
+            except (TypeError, ValueError):
+                sleep_hour = 0
+            if sleep_hour > 0:  # 0이면 쉬지 않고 계속 조회하므로 허용하지 않음
                 SLEEP_TIME = sleep_hour * 60 * 60
             else:
-                tax_log("w", "", f"설정된 sleep_hour 값이 올바르지 않습니다. 기본값(3)을 사용 합니다.")
+                SLEEP_TIME = 3 * 60 * 60
+                tax_log("w", "", f"설정된 sleep_hour 값({raw!r})이 올바르지 않습니다. 기본값(3)을 사용 합니다.")
     except Exception as e:
         tax_log("w","",f"설정 파일을 불러올 수 없습니다: {e}")
 
@@ -371,10 +376,13 @@ def send_notification(title, message, url=None, site_key=None, meta=None):
         root.geometry(f"{w}x{h}+{x}+{y}")
         root.deiconify()
 
-        for i in range(0, 11):
-            root.attributes("-alpha", i / 10)
-            root.update()
-            time.sleep(0.03)
+        try:
+            for i in range(0, 11):
+                root.attributes("-alpha", i / 10)
+                root.update()
+                time.sleep(0.03)
+        except tk.TclError:
+            return  # 페이드인 도중 버튼을 눌러 창이 이미 닫힌 경우(빠른 연속 클릭 등)
 
         root.mainloop()
     except Exception as e:
@@ -1723,25 +1731,32 @@ def on_update_menu(icon, item):
 def run_monitor():
     global tray_icon
     # 최초 실행시 즉시 한 번 체크
-    tax_log("i", "", f"프로그램 시작, 최초 모니터링 실행")
     manager.check_all()
-    check_for_update_if_due()
+    interrupted = False
     while True:
         next_check_time = datetime.datetime.now() + datetime.timedelta(seconds=SLEEP_TIME)
-        tax_log("i", "", f"다음 모니터링 예정 시간: {next_check_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        next_str = next_check_time.strftime('%Y-%m-%d %H:%M:%S')
+        # 주기마다 한 줄만 남긴다(주기 변경으로 타이머만 재시작한 경우는 점검 없이 예정 시간만 기록)
+        if interrupted:
+            tax_log("i", "", f"모니터링 주기 변경, 다음 예정: {next_str}")
+        else:
+            tax_log("i", "", f"모니터링 완료 (다음 예정: {next_str})")
+            check_for_update_if_due()
         if tray_icon is not None:
             tray_icon.title = f"다음 모니터링 예정 시간: {next_check_time.strftime('%H시 %M분')}"
         interrupted = _interval_changed.wait(SLEEP_TIME)
         _interval_changed.clear()
-        if interrupted:
-            tax_log("i", "", f"모니터링 주기 변경, 타이머 재시작")
-            continue
-        tax_log("i", "", f"시간 경과, 모니터링 시작")
-        manager.check_all()
-        check_for_update_if_due()
+        if not interrupted:
+            manager.check_all()
 
-# --- 시작프로그램'에 바로가기(.lnk) 파일 생성(최초 1회만 생성) --- 
+# --- '시작프로그램'에 바로가기(.lnk) 파일 생성/갱신 ---
+# 실행할 때마다 확인해 바로가기가 현재 실행 중인 exe를 가리키지 않으면 다시 만든다.
+# (다른 폴더에 새로 받아 실행한 경우 마지막에 실행한 exe 기준으로 자동 시작되도록)
 def add_to_startup():
+    # python TaxBoardWatcher.py 로 실행하면 sys.executable 이 python.exe 이므로 바로가기를 건드리지 않는다
+    if not getattr(sys, "frozen", False):
+        return
+
     startup_dir = os.path.join(os.getenv('APPDATA'), r"Microsoft\Windows\Start Menu\Programs\Startup")
 
     # Startup 폴더가 존재하는지 확인하고 없으면 생성
@@ -1749,19 +1764,31 @@ def add_to_startup():
         os.makedirs(startup_dir)
 
     shortcut_path = os.path.join(startup_dir, "TaxBoardWatcher.lnk")
+    exe_path = sys.executable  # 현재 실행 중인 exe 경로
+    work_dir = get_base_dir()
 
-    if not os.path.exists(shortcut_path):
-        # 바로가기 생성
-        import win32com.client
-        shell = win32com.client.Dispatch("WScript.Shell")
-        shortcut = shell.CreateShortCut(shortcut_path)
-        shortcut.TargetPath = sys.executable  # 현재 실행 중인 exe 경로
-        shortcut.WorkingDirectory = os.getcwd()
-        shortcut.IconLocation = sys.executable
-        shortcut.save()
+    import win32com.client
+    shell = win32com.client.Dispatch("WScript.Shell")
+    shortcut = shell.CreateShortCut(shortcut_path)  # 기존 파일이 있으면 그 설정을 읽어 온다
+    exists = os.path.exists(shortcut_path)
+    target_same = exists and os.path.normcase(shortcut.TargetPath) == os.path.normcase(exe_path)
+    work_dir_same = exists and os.path.normcase(shortcut.WorkingDirectory) == os.path.normcase(work_dir)
+
+    # 대상 exe와 작업 폴더가 모두 같으면 그대로 둔다(시작프로그램을 매번 고쳐 쓰지 않도록)
+    if target_same and work_dir_same:
+        return
+
+    old_target = shortcut.TargetPath
+    shortcut.TargetPath = exe_path
+    shortcut.WorkingDirectory = work_dir
+    shortcut.IconLocation = exe_path
+    shortcut.save()
+    if not exists:
         tax_log("i", "", f"시작프로그램 등록 완료: {shortcut_path}")
-    # else:
-        # tax_log("i", "", f"시작프로그램에 이미 등록되어 있습니다.")
+    elif not target_same:
+        tax_log("i", "", f"시작프로그램 바로가기 경로 갱신: {old_target} → {exe_path}")
+    else:
+        tax_log("i", "", f"시작프로그램 바로가기 작업 폴더 갱신: {work_dir}")
 
 def asciiart():
     with open(LOG, "a", encoding="utf-8") as f:
@@ -1776,17 +1803,18 @@ def asciiart():
 
 # 모니터링 수동 실행
 def manual_crawl(icon, item):
-    tax_log("i", "", f"수동 모니터링 시작")
+    tax_log("i", "", "수동 모니터링 시작")
     set_tray_icon(SEARCHING_ICON) # 트레이 아이콘 "검색"
+    notify_manual_monitor_toast("수동 모니터링", "점검을 시작합니다.", error=False)
     err = None
     try:
         manager.check_all()
+        tax_log("i", "", "수동 모니터링 완료")
     except Exception as e:
         err = e
         tax_log("e", "", f"수동 모니터링 오류: {e}")
     finally:
         set_tray_icon(ICON) # 트레이 아이콘 기본값
-        tax_log("i", "", f"수동 모니터링 완료")
     if err is None:
         notify_manual_monitor_toast("수동 모니터링", "모든 점검이 끝났습니다.", error=False)
     else:
@@ -1840,7 +1868,7 @@ if __name__ == "__main__":
             checked=lambda item: SLEEP_TIME == h * 3600,
             radio=True,
         )
-    interval_submenu = pystray.Menu(*[_make_interval_item(h) for h in [1, 2, 3, 4, 6, 12, 24]])
+    interval_submenu = pystray.Menu(*[_make_interval_item(h) for h in [1, 2, 3, 4, 5, 6]])
 
     def _test_notify(kind):
         if kind == "start":
@@ -1876,13 +1904,13 @@ if __name__ == "__main__":
     tray_icon.menu = pystray.Menu(
         pystray.MenuItem(f'TaxBoardWatcher  {VERSION}', None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem('게시물 목록', show_board_overview),
         pystray.MenuItem('모니터링 실행', manual_crawl),
         pystray.MenuItem('모니터링 주기', interval_submenu),
-        pystray.MenuItem('로그 열기', open_log_file),
+        pystray.MenuItem('게시물 목록', show_board_overview),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem('알림 테스트', test_submenu),
         pystray.MenuItem('업데이트 확인', on_update_menu),
+        pystray.MenuItem('알림 테스트', test_submenu),
+        pystray.MenuItem('로그', open_log_file),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('종료', on_exit),
     )
