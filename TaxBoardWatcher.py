@@ -35,7 +35,7 @@ try:
 except ImportError:
     WinotifyNotification = None
 
-VERSION = "v.5.0.5"
+VERSION = "v.5.0.6"
 
 # --- 자동 업데이트(GitHub Releases) ---
 GITHUB_REPO = "Choeinhyo825/TaxBoardWatcher"
@@ -123,12 +123,31 @@ def ensure_data_files():
     if not getattr(sys, "frozen", False):
         return
     src_dir = os.path.join(sys._MEIPASS, "default_data")
-    if not os.path.isdir(src_dir):
+    if os.path.isdir(src_dir):
+        for name in os.listdir(src_dir):
+            dst = os.path.join("data", name)
+            if not os.path.exists(dst):
+                shutil.copyfile(os.path.join(src_dir, name), dst)
+    ensure_readme()
+
+def ensure_readme():
+    """exe에 포함된 readme.txt를 exe 폴더에 풀어 놓는다.
+    설명서·변경 이력이라 사용자 데이터가 아니므로, 업데이트로 내용이 바뀌었으면 새 내용으로 교체한다."""
+    src = os.path.join(sys._MEIPASS, "readme.txt")
+    if not os.path.isfile(src):
         return
-    for name in os.listdir(src_dir):
-        dst = os.path.join("data", name)
-        if not os.path.exists(dst):
-            shutil.copyfile(os.path.join(src_dir, name), dst)
+    dst = os.path.join(get_base_dir(), "readme.txt")
+    try:
+        with open(src, "rb") as f:
+            new = f.read()
+        if os.path.isfile(dst):
+            with open(dst, "rb") as f:
+                if f.read() == new:
+                    return
+        with open(dst, "wb") as f:
+            f.write(new)
+    except Exception as e:
+        tax_log("e", "", f"readme.txt 생성 오류: {e}")
 
 def _load_logo_photo(site_key: str, max_h: int = 38):
     if site_key not in _logo_pil_cache:

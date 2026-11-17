@@ -13,8 +13,8 @@
 python TaxBoardWatcher.py
 
 # exe파일 생성 (winotify는 스크립트 상단 import로 PyInstaller에 포함됨. 토스트가 exe에서 안 뜨면 --hidden-import winotify 추가)
-# dist/data의 아이콘·로고·기본 설정을 exe에 포함 (실행 시 data/에 없는 파일만 풀어 놓음)
-pyinstaller --noconsole --onefile --name TaxBoardWatcher --add-data "dist/data/*.png;default_data" --add-data "dist/data/config.json;default_data" TaxBoardWatcher.py
+# dist/data의 아이콘·로고·기본 설정과 readme.txt를 exe에 포함 (실행 시 data/에 없는 파일만 풀어 놓고, readme.txt는 exe 폴더에 최신 내용으로 생성)
+pyinstaller --noconsole --onefile --name TaxBoardWatcher --add-data "dist/data/*.png;default_data" --add-data "dist/data/config.json;default_data" --add-data "dist/readme.txt;." TaxBoardWatcher.py
 
 # 자동시작 생성 경로
 C:\Users\사용자명\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
